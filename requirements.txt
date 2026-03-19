@@ -1,0 +1,4 @@
+openai
+pypdf
+gspread
+google-auth
