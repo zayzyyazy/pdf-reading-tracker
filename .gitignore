@@ -1,4 +1,30 @@
+# macOS
 .DS_Store
-input/*.pdf
-output/
+**/.DS_Store
+
+# Environment / secrets
 .env
+
+# Input files — keep the folder, ignore its contents
+input/*
+!input/.gitkeep
+
+# Any stray PDFs at the project root
+*.pdf
+
+# Processed files — keep the folder, ignore its contents
+processed/*
+!processed/.gitkeep
+
+# Generated output
+output/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
