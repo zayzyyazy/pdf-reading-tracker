@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="crumb">
+  <a href="/">Dashboard</a> /
+  <a href="/categories/{{ category.id }}">{{ category.name }}</a>
+  {% for b in breadcrumb %} / {% if loop.last %}{{ b.name }}{% else %}<a href="/subtopics/{{ b.id }}">{{ b.name }}</a>{% endif %}{% endfor %}
+  / Question
+</div>
+
+<div class="page-head">
+  <h1>Question</h1>
+  <p class="lede" style="font-size:1.05rem">{{ question.body }}</p>
+  <div class="meta">
+    {% if question.explored %}
+    <span class="pill">Explored</span>
+    {% else %}
+    <span class="pill">Open</span>
+    {% endif %}
+    {% if question.is_main %}<span class="pill">Main thread</span>{% endif %}
+  </div>
+</div>
+
+<div class="actions">
+  <form method="post" action="/questions/{{ question.id }}/toggle-explored">
+    <input type="hidden" name="redirect_to" value="/questions/{{ question.id }}">
+    <button type="submit">{% if question.explored %}Mark as open again{% else %}Mark explored{% endif %}</button>
+  </form>
+  <a class="button primary" href="/writings/new?subtopic_id={{ subtopic.id }}&question_id={{ question.id }}{% if resource %}&resource_id={{ resource.id }}{% endif %}">Write from this question</a>
+  <a class="button" href="/subtopics/{{ subtopic.id }}">Back to subtopic</a>
+  {% if resource %}
+  <a class="button" href="/resources/{{ resource.id }}">View resource</a>
+  {% endif %}
+</div>
+{% endblock %}

@@ -19,6 +19,10 @@ processed/*
 # Generated output
 output/
 
+# Research workspace local data
+data/research.sqlite
+data/workspace_uploads/
+
 # Python
 __pycache__/
 *.pyc

@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="crumb">
+  <a href="/">Dashboard</a> /
+  <a href="/categories/{{ category.id }}">{{ category.name }}</a>
+  {% for b in breadcrumb %}
+    /
+    {% if loop.last %}
+      {{ b.name }}
+    {% else %}
+      <a href="/subtopics/{{ b.id }}">{{ b.name }}</a>
+    {% endif %}
+  {% endfor %}
+</div>
+
+<div class="page-head">
+  <h1>{{ subtopic.name }}</h1>
+  {% if subtopic.research_field %}
+  <p class="lede"><span class="pill">{{ subtopic.research_field }}</span></p>
+  {% endif %}
+  {% if subtopic.topic_summary %}
+  <p class="lede">{{ subtopic.topic_summary }}</p>
+  {% endif %}
+  <div class="meta" style="margin-top:0.5rem">
+    <span class="pill">{{ counts.children }} nested subtopics</span>
+    <span class="pill">{{ counts.resources }} resources</span>
+    <span class="pill">{{ counts.questions }} questions</span>
+    <span class="pill">{{ counts.writings }} writings</span>
+  </div>
+</div>
+
+<div class="actions" style="margin-bottom:1rem">
+  <a class="button primary" href="/resources/new?subtopic_id={{ subtopic.id }}">Add resource</a>
+  <a class="button" href="/writings/new?subtopic_id={{ subtopic.id }}">New writing</a>
+</div>
+
+{% if children %}
+<section class="section">
+  <h2>Nested subtopics</h2>
+  <div class="grid cols-2">
+    {% for c in children %}
+    <a class="card" href="/subtopics/{{ c.id }}" style="text-decoration:none;color:inherit">
+      <h3>{{ c.name }}</h3>
+      {% if c.research_field %}<span class="pill">{{ c.research_field }}</span>{% endif %}
+      <div class="tag" style="margin-top:0.5rem">
+        {{ c.counts.resources }} resources · {{ c.counts.questions }} questions
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<div class="card section">
+  <h3 style="margin-top:0">Add nested subtopic</h3>
+  <form method="post" action="/subtopics/{{ subtopic.id }}/children/new">
+    <div class="field">
+      <label for="ch-name">Name</label>
+      <input id="ch-name" name="name" type="text" required>
+    </div>
+    <div class="field">
+      <label for="ch-field">Research field label (optional)</label>
+      <input id="ch-field" name="research_field" type="text">
+    </div>
+    <div class="field">
+      <label for="ch-sum">Topic summary (optional)</label>
+      <textarea id="ch-sum" name="topic_summary"></textarea>
+    </div>
+    <button class="primary" type="submit">Create nested subtopic</button>
+  </form>
+</div>
+
+<section class="section">
+  <h2>Resources</h2>
+  <div class="card">
+    <ul class="list">
+      {% for r in resources %}
+      <li class="row-between">
+        <div>
+          <a href="/resources/{{ r.id }}">{{ r.title }}</a>
+          <div class="tag">{{ r.source_type }}{% if r.file_path %} · file attached{% endif %}</div>
+        </div>
+      </li>
+      {% else %}
+      <li class="muted">No resources in this subtopic yet.</li>
+      {% endfor %}
+    </ul>
+  </div>
+</section>
+
+<section class="section">
+  <h2>Questions</h2>
+  <div class="card">
+    <ul class="list">
+      {% for q in questions %}
+      <li class="row-between">
+        <div>
+          <a href="/questions/{{ q.id }}">{{ q.body }}</a>
+          {% if q.resource_id %}<div class="tag">Tied to a resource</div>{% else %}<div class="tag">Subtopic-wide</div>{% endif %}
+        </div>
+        <form method="post" action="/questions/{{ q.id }}/toggle-explored" style="margin:0">
+          <input type="hidden" name="redirect_to" value="/subtopics/{{ subtopic.id }}">
+          <button type="submit" class="ghost">{% if q.explored %}Mark open{% else %}Mark explored{% endif %}</button>
+        </form>
+      </li>
+      {% else %}
+      <li class="muted">No questions yet — add manually or generate from a resource.</li>
+      {% endfor %}
+    </ul>
+    <form method="post" action="/questions/new" style="margin-top:1rem">
+      <input type="hidden" name="subtopic_id" value="{{ subtopic.id }}">
+      <input type="hidden" name="redirect_to" value="/subtopics/{{ subtopic.id }}">
+      <div class="field">
+        <label for="q-body">Add a question</label>
+        <textarea id="q-body" name="body" placeholder="What are you trying to figure out here?"></textarea>
+      </div>
+      <button class="primary" type="submit">Save question</button>
+    </form>
+  </div>
+</section>
+
+<section class="section">
+  <h2>Writing</h2>
+  <div class="card">
+    <ul class="list">
+      {% for w in writings %}
+      <li>
+        <a href="/writings/{{ w.id }}/edit">{{ w.title or "Untitled piece" }}</a>
+        <div class="tag">Updated {{ w.updated_at[:16] }}</div>
+      </li>
+      {% else %}
+      <li class="muted">No pieces yet — capture an opinion dump while it is fresh.</li>
+      {% endfor %}
+    </ul>
+  </div>
+</section>
+{% endblock %}

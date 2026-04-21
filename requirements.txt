@@ -3,3 +3,7 @@ pypdf
 python-docx
 gspread
 google-auth
+fastapi
+uvicorn[standard]
+jinja2
+python-multipart

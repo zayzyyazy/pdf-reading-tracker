@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="crumb">
+  <a href="/">Dashboard</a> /
+  <a href="/categories/{{ category.id }}">{{ category.name }}</a>
+  {% for b in breadcrumb %} / {% if loop.last %}{{ b.name }}{% else %}<a href="/subtopics/{{ b.id }}">{{ b.name }}</a>{% endif %}{% endfor %}
+</div>
+
+<div class="page-head">
+  <h1>Add resource</h1>
+  <p class="lede">Attach a PDF, text, or Word file, or enter metadata by hand. When a file is readable, the app drafts a title and summary for you to edit later.</p>
+</div>
+
+<div class="card">
+  <form method="post" action="/resources/new" enctype="multipart/form-data">
+    <input type="hidden" name="subtopic_id" value="{{ subtopic.id }}">
+    <div class="field">
+      <label for="title">Title (optional if uploading — we will infer)</label>
+      <input id="title" name="title" type="text" placeholder="Working title">
+    </div>
+    <div class="field">
+      <label for="stype">Source type</label>
+      <select id="stype" name="source_type">
+        <option value="pdf">PDF</option>
+        <option value="paper">Paper</option>
+        <option value="article">Article</option>
+        <option value="notes">Notes</option>
+        <option value="other">Other</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="file">File (optional)</label>
+      <input id="file" name="file" type="file" accept=".pdf,.txt,.docx">
+    </div>
+    <div class="field">
+      <label for="summary">Summary (optional)</label>
+      <textarea id="summary" name="summary" placeholder="Your own summary or paste an abstract"></textarea>
+    </div>
+    <div class="field">
+      <label for="notes">Notes / context</label>
+      <textarea id="notes" name="notes" placeholder="Why this matters in this subtopic"></textarea>
+    </div>
+    <button class="primary" type="submit">Save resource</button>
+    <a class="button ghost" href="/subtopics/{{ subtopic.id }}">Cancel</a>
+  </form>
+</div>
+{% endblock %}

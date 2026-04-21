@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="crumb"><a href="/">Dashboard</a> / {{ category.name }}</div>
+<div class="page-head">
+  <h1>{{ category.name }}</h1>
+  {% if category.description %}<p class="lede">{{ category.description }}</p>{% endif %}
+  <div class="meta" style="margin-top:0.5rem">
+    <span class="pill">{{ counts.subtopics }} subtopics</span>
+    <span class="pill">{{ counts.resources }} resources</span>
+    <span class="pill">{{ counts.questions }} questions</span>
+    <span class="pill">{{ counts.writings }} writings</span>
+  </div>
+</div>
+
+<div class="split">
+  <div>
+    <h2>Subtopics</h2>
+    <div class="grid cols-2">
+      {% for s in subtopics %}
+      <a class="card" href="/subtopics/{{ s.id }}" style="text-decoration:none;color:inherit">
+        <h3>{{ s.name }}</h3>
+        {% if s.research_field %}<div class="pill">{{ s.research_field }}</div>{% endif %}
+        {% if s.topic_summary %}<p class="muted" style="margin:0.5rem 0 0">{{ s.topic_summary }}</p>{% endif %}
+        <div class="tag" style="margin-top:0.5rem">
+          {{ s.counts.resources }} resources · {{ s.counts.questions }} questions · {{ s.counts.writings }} writings
+        </div>
+      </a>
+      {% else %}
+      <p class="muted">No subtopics yet — create one below.</p>
+      {% endfor %}
+    </div>
+
+    <div class="card section">
+      <h3 style="margin-top:0">Add subtopic</h3>
+      <form method="post" action="/categories/{{ category.id }}/subtopics/new">
+        <div class="field">
+          <label for="st-name">Name</label>
+          <input id="st-name" name="name" type="text" required>
+        </div>
+        <div class="field">
+          <label for="st-field">Research field label (optional)</label>
+          <input id="st-field" name="research_field" type="text" placeholder="e.g. philosophy of science">
+        </div>
+        <div class="field">
+          <label for="st-sum">Topic summary (optional)</label>
+          <textarea id="st-sum" name="topic_summary" placeholder="What this cluster is about in your own words"></textarea>
+        </div>
+        <button class="primary" type="submit">Create subtopic</button>
+      </form>
+    </div>
+  </div>
+
+  <aside>
+    <div class="panel">
+      <h3>Name ideas (lightweight)</h3>
+      <p class="muted" style="margin-top:0">Suggestions based on titles already in this category. Use as sparks, not prescriptions.</p>
+      <ul class="list">
+        {% for name in suggestions %}
+        <li class="muted">{{ name }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </aside>
+</div>
+{% endblock %}

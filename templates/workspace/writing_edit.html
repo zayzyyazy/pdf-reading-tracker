@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="crumb">
+  <a href="/">Dashboard</a> /
+  <a href="/categories/{{ category.id }}">{{ category.name }}</a>
+  {% for b in breadcrumb %} / {% if loop.last %}{{ b.name }}{% else %}<a href="/subtopics/{{ b.id }}">{{ b.name }}</a>{% endif %}{% endfor %}
+  / {% if writing %}Edit writing{% else %}New writing{% endif %}
+</div>
+
+<div class="page-head">
+  <h1>{% if writing %}{{ writing.title or "Writing" }}{% else %}New writing{% endif %}</h1>
+  <p class="lede">Keep your voice. Use refinement for structure and clarity, then choose whether to apply it.</p>
+</div>
+
+{% if writing and writing.refined_suggestion %}
+<div class="card" style="margin-bottom:1rem;border-style:dashed">
+  <h3 style="margin-top:0">Refined suggestion</h3>
+  <div class="suggestion">{{ writing.refined_suggestion }}</div>
+  <div class="actions">
+    <form method="post" action="/writings/{{ writing.id }}/apply-refined">
+      <button class="primary" type="submit">Replace draft with suggestion</button>
+    </form>
+    <form method="post" action="/writings/{{ writing.id }}/discard-refined">
+      <button class="ghost" type="submit">Discard suggestion</button>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <form id="save-form" method="post" action="/writings/save">
+    {% if writing %}<input type="hidden" name="writing_id" value="{{ writing.id }}">{% endif %}
+    <input type="hidden" name="subtopic_id" value="{{ subtopic.id }}">
+    <input type="hidden" name="resource_id" value="{{ resource_id }}">
+    <input type="hidden" name="question_id" value="{{ question_id }}">
+
+    <div class="field">
+      <label for="wtitle">Title (optional)</label>
+      <input id="wtitle" name="title" type="text" value="{{ form_title }}">
+    </div>
+
+    <div class="field">
+      <label for="body-field">Draft</label>
+      <textarea id="body-field" name="body" style="min-height:260px" required>{{ form_body }}</textarea>
+    </div>
+
+    {% if resource %}
+    <p class="muted">Linked resource: <a href="/resources/{{ resource.id }}">{{ resource.title }}</a></p>
+    {% endif %}
+    {% if question %}
+    <p class="muted">Linked question: <a href="/questions/{{ question.id }}">{{ question.body }}</a></p>
+    {% endif %}
+
+    <div class="actions">
+      <button class="primary" type="submit">Save</button>
+      <a class="button" href="/subtopics/{{ subtopic.id }}">Back to subtopic</a>
+    </div>
+  </form>
+
+  {% if writing %}
+  <hr style="border:none;border-top:1px solid var(--border);margin:1.5rem 0">
+
+  <h3>Refine with AI</h3>
+  <p class="muted">Saves your current draft first, then stores a suggestion you can apply or discard.</p>
+  <form id="refine-form" method="post" action="/writings/{{ writing.id }}/refine">
+    <input type="hidden" name="body" id="refine-body-hidden" value="">
+    <div class="field">
+      <label for="focus">Editing focus (optional)</label>
+      <input id="focus" name="focus" type="text" placeholder="e.g. tighten argument, keep tone informal">
+    </div>
+    <button type="submit" class="button primary" id="refine-btn">Generate refined suggestion</button>
+  </form>
+  <script>
+    (function () {
+      var refineForm = document.getElementById("refine-form");
+      if (!refineForm) return;
+      refineForm.addEventListener("submit", function () {
+        var body = document.getElementById("body-field");
+        var hidden = document.getElementById("refine-body-hidden");
+        if (body && hidden) hidden.value = body.value;
+      });
+    })();
+  </script>
+  {% endif %}
+</div>
+{% endblock %}

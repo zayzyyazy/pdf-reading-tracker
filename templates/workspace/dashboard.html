@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <h1>Your thinking space</h1>
+  <p class="lede">Categories first, then subtopics, resources, questions, and writing — layered so you can browse, revisit, and deepen ideas over time.</p>
+</div>
+
+<section class="section">
+  <div class="row-between" style="margin-bottom:0.75rem">
+    <h2>Categories</h2>
+  </div>
+  <div class="grid cols-3">
+    {% for c in categories %}
+    <a class="card" href="/categories/{{ c.id }}" style="text-decoration:none;color:inherit">
+      <h3>{{ c.name }}</h3>
+      <div class="meta">
+        <span class="pill">{{ c.counts.subtopics }} subtopics</span>
+        <span class="pill">{{ c.counts.resources }} resources</span>
+        <span class="pill">{{ c.counts.writings }} writings</span>
+      </div>
+      {% if c.description %}
+      <p class="muted" style="margin:0">{{ c.description }}</p>
+      {% endif %}
+      <div class="tag" style="margin-top:0.5rem">{{ c.counts.open_questions }} open questions</div>
+    </a>
+    {% endfor %}
+  </div>
+
+  <div class="card" style="margin-top:1rem">
+    <h3 style="margin-top:0">New category</h3>
+    <form method="post" action="/categories/new">
+      <div class="field">
+        <label for="cat-name">Name</label>
+        <input id="cat-name" name="name" type="text" required placeholder="e.g. Political theory">
+      </div>
+      <div class="field">
+        <label for="cat-desc">Description (optional)</label>
+        <input id="cat-desc" name="description" type="text" placeholder="What this area is for">
+      </div>
+      <button class="primary" type="submit">Create category</button>
+    </form>
+  </div>
+</section>
+
+<div class="split section">
+  <div>
+    <h2>Recent resources</h2>
+    <div class="card">
+      <ul class="list">
+        {% for r in recent_resources %}
+        <li>
+          <div class="row-between">
+            <div>
+              <a href="/resources/{{ r.id }}">{{ r.title }}</a>
+              <div class="tag">{{ r.category_name }} · {{ r.subtopic_name }}</div>
+            </div>
+          </div>
+        </li>
+        {% else %}
+        <li class="muted">No resources yet — open a subtopic and add one.</li>
+        {% endfor %}
+      </ul>
+    </div>
+
+    <h2 class="section">Recent writing</h2>
+    <div class="card">
+      <ul class="list">
+        {% for w in recent_writings %}
+        <li>
+          <a href="/writings/{{ w.id }}/edit">{{ w.title or "Untitled piece" }}</a>
+          <div class="tag">{{ w.category_name }} · {{ w.subtopic_name }}</div>
+        </li>
+        {% else %}
+        <li class="muted">No writing yet — start from a subtopic or question.</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+
+  <aside>
+    <h2>Open questions</h2>
+    <div class="card">
+      <ul class="list">
+        {% for q in open_questions %}
+        <li>
+          <a href="/questions/{{ q.id }}">{{ q.body }}</a>
+          <div class="tag">{{ q.category_name }} · {{ q.subtopic_name }}</div>
+        </li>
+        {% else %}
+        <li class="muted">No open questions — explore a resource and generate some.</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </aside>
+</div>
+{% endblock %}

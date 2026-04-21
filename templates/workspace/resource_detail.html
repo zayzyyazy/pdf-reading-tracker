@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="crumb">
+  <a href="/">Dashboard</a> /
+  <a href="/categories/{{ category.id }}">{{ category.name }}</a>
+  {% for b in breadcrumb %} / {% if loop.last %}{{ b.name }}{% else %}<a href="/subtopics/{{ b.id }}">{{ b.name }}</a>{% endif %}{% endfor %}
+  / Resource
+</div>
+
+<div class="page-head">
+  <h1>{{ resource.title }}</h1>
+  <div class="meta">
+    <span class="pill">{{ resource.source_type }}</span>
+    {% if resource.file_path %}
+    <a class="button" href="/files/resource/{{ resource.id }}">Download file</a>
+    {% endif %}
+  </div>
+</div>
+
+<div class="split">
+  <div class="stack">
+    <div class="card">
+      <h3 style="margin-top:0">Summary</h3>
+      {% if resource.summary %}
+      <p style="white-space:pre-wrap;margin:0">{{ resource.summary }}</p>
+      {% else %}
+      <p class="muted">No summary yet — edit below or re-upload with text extraction.</p>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">Your notes</h3>
+      {% if resource.notes %}
+      <p style="white-space:pre-wrap;margin:0">{{ resource.notes }}</p>
+      {% else %}
+      <p class="muted">No notes yet.</p>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">Edit resource</h3>
+      <form method="post" action="/resources/{{ resource.id }}/edit">
+        <div class="field">
+          <label for="title">Title</label>
+          <input id="title" name="title" type="text" value="{{ resource.title }}" required>
+        </div>
+        <div class="field">
+          <label for="stype">Source type</label>
+          <select id="stype" name="source_type">
+            {% for opt in ['pdf','paper','article','notes','other'] %}
+            <option value="{{ opt }}" {% if resource.source_type == opt %}selected{% endif %}>{{ opt }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label for="summary">Summary</label>
+          <textarea id="summary" name="summary">{{ resource.summary or '' }}</textarea>
+        </div>
+        <div class="field">
+          <label for="notes">Notes</label>
+          <textarea id="notes" name="notes">{{ resource.notes or '' }}</textarea>
+        </div>
+        <button class="primary" type="submit">Save changes</button>
+      </form>
+    </div>
+  </div>
+
+  <aside class="stack">
+    <div class="card">
+      <h3 style="margin-top:0">Questions</h3>
+      <ul class="list">
+        {% for q in questions %}
+        <li><a href="/questions/{{ q.id }}">{{ q.body }}</a></li>
+        {% else %}
+        <li class="muted">No questions linked to this resource yet.</li>
+        {% endfor %}
+      </ul>
+      <form method="post" action="/questions/new" style="margin-top:0.75rem">
+        <input type="hidden" name="subtopic_id" value="{{ subtopic.id }}">
+        <input type="hidden" name="resource_id" value="{{ resource.id }}">
+        <input type="hidden" name="redirect_to" value="/resources/{{ resource.id }}">
+        <div class="field">
+          <label for="qb">Add question</label>
+          <textarea id="qb" name="body" placeholder="Something this source makes you ask"></textarea>
+        </div>
+        <button type="submit">Add</button>
+      </form>
+      <form method="post" action="/resources/{{ resource.id }}/questions/generate" style="margin-top:0.75rem">
+        <button class="primary" type="submit">Generate questions</button>
+        <p class="muted" style="margin:0.35rem 0 0;font-size:0.85rem">Uses your OpenAI key when set; otherwise uses built-in prompts.</p>
+      </form>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">Writing</h3>
+      <p class="muted" style="margin-top:0">Start a piece anchored on this resource.</p>
+      <a class="button primary" href="/writings/new?subtopic_id={{ subtopic.id }}&resource_id={{ resource.id }}">New writing from resource</a>
+    </div>
+
+    <div class="card">
+      <a class="button ghost" href="/subtopics/{{ subtopic.id }}">Back to subtopic</a>
+    </div>
+  </aside>
+</div>
+{% endblock %}
