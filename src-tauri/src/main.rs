@@ -1,39 +1,96 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use tauri::webview::WebviewWindowBuilder;
-use tauri::{AppHandle, Manager, RunEvent, State, Url, WebviewUrl};
+use tauri::{Manager, RunEvent, State, Url, WebviewUrl};
 
-struct ServerChild(Mutex<Option<Child>>);
+/// Matches `identifier` in `tauri.conf.json`.
+const APP_SUPPORT_LEAF: &str = "com.research.workspace/workspace-data";
 
-fn workspace_root(app: &AppHandle) -> Result<PathBuf, String> {
-    if cfg!(debug_assertions) {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .canonicalize()
-            .map_err(|e| e.to_string())
-    } else {
-        let res = app.path().resource_dir().map_err(|e| e.to_string())?;
-        // Tauri bundles `../app` paths under `Resources/_up_/`.
-        let nested = res.join("_up_");
-        if nested.join("app").is_dir() {
-            nested.canonicalize().map_err(|e| e.to_string())
-        } else {
-            Ok(res)
+struct LauncherInner {
+    port: u16,
+    child: Mutex<Option<Child>>,
+}
+
+fn show_startup_error(title: &str, message: &str) {
+    eprintln!("{title}: {message}");
+    #[cfg(target_os = "macos")]
+    {
+        let msg: String = message.chars().take(900).collect::<String>().replace('"', "'");
+        let t: String = title.chars().take(120).collect::<String>().replace('"', "'");
+        let script = format!(
+            r#"display dialog "{msg}" with title "{t}" buttons {{"OK"}} default button "OK" with icon stop"#
+        );
+        let _ = Command::new("osascript").args(["-e", &script]).status();
+    }
+}
+
+fn kill_child(inner: &Arc<LauncherInner>) {
+    if let Ok(mut g) = inner.child.lock() {
+        if let Some(mut child) = g.take() {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }
 
-fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_data_dir()
-        .map(|p| p.join("workspace-data"))
-        .map_err(|e| e.to_string())
+fn resolve_workspace_root() -> Result<PathBuf, String> {
+    if cfg!(debug_assertions) {
+        return PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .canonicalize()
+            .map_err(|e| format!("Could not resolve project root: {e}"));
+    }
+
+    let exe = std::env::current_exe().map_err(|e| format!("Could not read executable path: {e}"))?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "Executable has no parent directory".to_string())?
+        .to_path_buf();
+
+    if dir.ends_with("MacOS") {
+        let resources = dir
+            .parent()
+            .ok_or_else(|| "Invalid .app bundle layout".to_string())?
+            .join("Resources");
+        let nested = resources.join("_up_");
+        if nested.join("app").is_dir() {
+            return Ok(match nested.canonicalize() {
+                Ok(p) => p,
+                Err(_) => nested,
+            });
+        }
+        if resources.join("app").is_dir() {
+            return Ok(match resources.canonicalize() {
+                Ok(p) => p,
+                Err(_) => resources,
+            });
+        }
+        return Err(format!(
+            "Bundled app not found. Expected app/ under:\n{}\nor\n{}",
+            nested.display(),
+            resources.display()
+        ));
+    }
+
+    Err(
+        "Could not locate bundled workspace (expected a macOS .app).".to_string(),
+    )
+}
+
+fn resolve_data_dir() -> Result<PathBuf, String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME is not set.".to_string())?;
+    let p = PathBuf::from(home)
+        .join("Library/Application Support")
+        .join(APP_SUPPORT_LEAF);
+    std::fs::create_dir_all(&p).map_err(|e| format!("Could not create data directory {}: {e}", p.display()))?;
+    Ok(p)
 }
 
 fn pick_port() -> u16 {
@@ -56,15 +113,25 @@ fn wait_for_port(port: u16) -> bool {
     false
 }
 
+fn read_stderr_head(child: &mut Child, max: usize) -> String {
+    let mut out = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        let mut buf = vec![0u8; max];
+        if let Ok(n) = stderr.read(&mut buf) {
+            out.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+    }
+    out.trim().to_string()
+}
+
 fn spawn_server(root: &PathBuf, data: &PathBuf, port: u16) -> Result<Child, String> {
-    std::fs::create_dir_all(data).map_err(|e| e.to_string())?;
     let sqlite = data.join("research.sqlite");
     let uploads = data.join("workspace_uploads");
-    std::fs::create_dir_all(&uploads).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&uploads).map_err(|e| format!("Could not create uploads dir: {e}"))?;
 
     let python = std::env::var("RESEARCH_WORKSPACE_PYTHON").unwrap_or_else(|_| "python3".into());
 
-    Command::new(&python)
+    let mut child = Command::new(&python)
         .current_dir(root)
         .env("PYTHONPATH", root.as_os_str())
         .env("PYTHONUNBUFFERED", "1")
@@ -86,61 +153,97 @@ fn spawn_server(root: &PathBuf, data: &PathBuf, port: u16) -> Result<Child, Stri
         .spawn()
         .map_err(|e| {
             format!(
-                "Could not start Python ({python}): {e}\n\nFrom the project folder run:\n  python3 -m pip install -r requirements.txt"
+                "Could not start `{python}`.\nInstall Python 3 and:\n  python3 -m pip install -r requirements.txt\n\nDetails: {e}"
             )
-        })
+        })?;
+
+    if !wait_for_port(port) {
+        let err = read_stderr_head(&mut child, 4096);
+        let _ = child.kill();
+        let _ = child.wait();
+        let hint = if err.is_empty() {
+            "The server never listened on the port (missing uvicorn/FastAPI?).".to_string()
+        } else {
+            format!("Server output:\n{err}")
+        };
+        return Err(hint);
+    }
+
+    Ok(child)
 }
 
-fn kill_server(state: &ServerChild) {
-    if let Ok(mut g) = state.0.lock() {
-        if let Some(mut child) = g.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
+fn start_backend() -> Result<(Child, u16), String> {
+    let root = resolve_workspace_root()?;
+    let data = resolve_data_dir()?;
+    let port = pick_port();
+    let child = spawn_server(&root, &data, port)?;
+    Ok((child, port))
 }
 
 fn main() {
-    tauri::Builder::default()
-        .manage(ServerChild(Mutex::new(None)))
-        .setup(|app| {
-            let handle = app.handle().clone();
-            let root = workspace_root(&handle)?;
-            let data = data_dir(&handle)?;
-            let port = pick_port();
+    let (child, port) = match start_backend() {
+        Ok(x) => x,
+        Err(e) => {
+            show_startup_error("Research Workspace", &e);
+            std::process::exit(1);
+        }
+    };
 
-            let child = spawn_server(&root, &data, port)?;
-            {
-                let state: State<ServerChild> = app.state();
-                *state.0.lock().map_err(|_| "server state lock poisoned")? = Some(child);
-            }
+    let inner = Arc::new(LauncherInner {
+        port,
+        child: Mutex::new(Some(child)),
+    });
+    let inner_on_build_fail = Arc::clone(&inner);
 
-            if !wait_for_port(port) {
-                let state: State<ServerChild> = app.state();
-                kill_server(&state);
-                return Err("The workspace server did not become ready in time.".into());
-            }
+    let app = match tauri::Builder::default()
+        .manage(Arc::clone(&inner))
+        .setup(move |app| {
+            let launcher: State<Arc<LauncherInner>> = app.state();
+            let url = match Url::parse(&format!("http://127.0.0.1:{}/", launcher.port)) {
+                Ok(u) => u,
+                Err(e) => {
+                    show_startup_error(
+                        "Research Workspace",
+                        &format!("Internal URL error: {e}"),
+                    );
+                    kill_child(launcher.inner());
+                    std::process::exit(1);
+                }
+            };
 
-            let url: Url = Url::parse(&format!("http://127.0.0.1:{port}/"))
-                .map_err(|e| format!("Invalid server URL: {e}"))?;
-
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+            if let Err(e) = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("Research Workspace")
                 .inner_size(1280.0, 860.0)
                 .min_inner_size(980.0, 640.0)
                 .center()
                 .build()
-                .map_err(|e| e.to_string())?;
+            {
+                let msg = format!("Could not open the workspace window: {e}");
+                show_startup_error("Research Workspace", &msg);
+                kill_child(launcher.inner());
+                std::process::exit(1);
+            }
 
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(|app_handle, event| {
-            if matches!(event, RunEvent::Exit) {
-                if let Some(state) = app_handle.try_state::<ServerChild>() {
-                    kill_server(&*state);
-                }
+    {
+        Ok(a) => a,
+        Err(e) => {
+            show_startup_error(
+                "Research Workspace",
+                &format!("Desktop shell failed to initialize: {e}"),
+            );
+            kill_child(&inner_on_build_fail);
+            std::process::exit(1);
+        }
+    };
+
+    app.run(|app_handle, event| {
+        if matches!(event, RunEvent::Exit) {
+            if let Some(launcher) = app_handle.try_state::<Arc<LauncherInner>>() {
+                kill_child(launcher.inner());
             }
-        });
+        }
+    });
 }
