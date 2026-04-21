@@ -23,6 +23,9 @@ output/
 data/research.sqlite
 data/workspace_uploads/
 
+# Tauri / Rust
+src-tauri/target/
+
 # Python
 __pycache__/
 *.pyc

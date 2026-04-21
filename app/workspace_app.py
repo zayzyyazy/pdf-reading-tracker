@@ -17,7 +17,14 @@ from app import research_db as db
 from app import research_ai
 from app.pdf_reader import extract_text_from_docx, extract_text_from_pdf, extract_text_from_txt
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+def _workspace_base_dir() -> str:
+    r = os.environ.get("RESEARCH_WORKSPACE_ROOT")
+    if r:
+        return os.path.abspath(r)
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+BASE_DIR = _workspace_base_dir()
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates", "workspace")
 STATIC_DIR = os.path.join(BASE_DIR, "static", "workspace")
 

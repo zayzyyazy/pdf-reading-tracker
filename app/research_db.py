@@ -11,9 +11,30 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_PATH = os.path.join(BASE_DIR, "data", "research.sqlite")
-UPLOADS_DIR = os.path.join(BASE_DIR, "data", "workspace_uploads")
+def _resolve_workspace_paths() -> tuple[str, str, str]:
+    """(workspace_root, sqlite_path, uploads_dir). Env vars set by the Tauri desktop shell."""
+    env_root = os.environ.get("RESEARCH_WORKSPACE_ROOT")
+    if env_root:
+        base = os.path.abspath(env_root)
+    else:
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    env_db = os.environ.get("RESEARCH_SQLITE_PATH")
+    if env_db:
+        db_path = os.path.abspath(env_db)
+    else:
+        db_path = os.path.join(base, "data", "research.sqlite")
+
+    env_up = os.environ.get("RESEARCH_UPLOADS_DIR")
+    if env_up:
+        uploads = os.path.abspath(env_up)
+    else:
+        uploads = os.path.join(base, "data", "workspace_uploads")
+
+    return base, db_path, uploads
+
+
+BASE_DIR, DB_PATH, UPLOADS_DIR = _resolve_workspace_paths()
 
 
 def _now() -> str:
