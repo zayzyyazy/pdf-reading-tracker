@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <h1>Add resources</h1>
+  <p class="lede">Drop PDFs, text files, or Word documents. If you do not pick a subtopic, the app suggests one from your existing shelves (OpenAI when configured, otherwise the first subtopic).</p>
+</div>
+
+{% if not has_subtopics %}
+<div class="card">
+  <p class="muted">Create at least one category and subtopic first, then return here.</p>
+  <a class="button primary" href="/">Back to dashboard</a>
+</div>
+{% else %}
+
+<div class="card intake-card" id="intake-root">
+  <div class="ai-status-line" style="margin-bottom:1rem">
+    {% if ai.configured %}
+    <span class="pill pill-on">AI placement on</span>
+    {% else %}
+    <span class="pill pill-off">AI placement off</span>
+    <span class="muted" style="margin-left:0.35rem">Files go to your first subtopic unless you choose below.</span>
+    {% endif %}
+  </div>
+
+  <form id="intake-form" method="post" action="/intake" enctype="multipart/form-data">
+    <div class="field">
+      <label for="intake-subtopic">Place in (optional)</label>
+      <select id="intake-subtopic" name="subtopic_id">
+        <option value="">Let the app suggest…</option>
+        {% for s in subtopics %}
+        <option value="{{ s.id }}" {% if prefill_subtopic == s.id %}selected{% endif %}>{{ s.category_name }} — {{ s.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="intake-file">Or choose files</label>
+      <input id="intake-file" name="files" type="file" multiple accept=".pdf,.txt,.docx,application/pdf">
+    </div>
+    <div class="actions">
+      <button class="primary" type="submit" id="intake-submit">Upload</button>
+      <a class="button ghost" href="/">Dashboard</a>
+    </div>
+  </form>
+
+  <div class="dropzone" id="intake-drop" tabindex="0" aria-label="Drop files to add as resources">
+    <p class="dropzone-title">Drop files here</p>
+    <p class="muted" style="margin:0;font-size:0.9rem">PDF, TXT, or DOCX · multiple files welcome</p>
+  </div>
+</div>
+
+<script>
+(function () {
+  var form = document.getElementById("intake-form");
+  var drop = document.getElementById("intake-drop");
+  var sub = document.getElementById("intake-subtopic");
+  if (!form || !drop) return;
+
+  function postFiles(fileList) {
+    var fd = new FormData();
+    if (sub && sub.value) fd.append("subtopic_id", sub.value);
+    for (var i = 0; i < fileList.length; i++) fd.append("files", fileList[i]);
+    fetch(form.action, { method: "POST", body: fd, redirect: "manual" })
+      .then(function (r) {
+        if (r.status >= 300 && r.status < 400) {
+          var loc = r.headers.get("Location");
+          if (loc) {
+            window.location = loc;
+            return;
+          }
+        }
+        if (!r.ok) {
+          alert(r.status + " — could not complete intake. Use PDF, TXT, or DOCX.");
+        }
+      })
+      .catch(function () {
+        alert("Network error while uploading.");
+      });
+  }
+
+  ["dragenter", "dragover"].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      drop.classList.add("dropzone-active");
+    });
+  });
+  ["dragleave", "drop"].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      drop.classList.remove("dropzone-active");
+    });
+  });
+  drop.addEventListener("drop", function (e) {
+    var files = e.dataTransfer && e.dataTransfer.files;
+    if (!files || !files.length) return;
+    postFiles(files);
+  });
+})();
+</script>
+{% endif %}
+{% endblock %}

@@ -5,16 +5,18 @@ Falls back to simple heuristics when no API key is configured or the API is unav
 from __future__ import annotations
 
 import json
+from typing import Any, Optional
 
-import app.config as config
+import app.settings_store as settings_store
 
 
 def _client():
-    if not config.OPENAI_API_KEY:
+    key = settings_store.effective_openai_key()
+    if not key:
         return None
     from openai import OpenAI
 
-    return OpenAI(api_key=config.OPENAI_API_KEY)
+    return OpenAI(api_key=key)
 
 
 def _offline_summary(snippet: str) -> dict[str, str]:
@@ -174,3 +176,67 @@ def suggest_subtopic_names(category_name: str, resource_titles: list[str]) -> li
         return out if out else _offline_subtopic_suggestions(category_name)
     except (json.JSONDecodeError, Exception):
         return _offline_subtopic_suggestions(category_name)
+
+
+def suggest_subtopic_for_resource(
+    text_snippet: str,
+    filename: str,
+    subtopics: list[dict[str, Any]],
+) -> Optional[str]:
+    """
+    Pick the best subtopic_id from the given list using the model, or None on failure.
+    Each subtopic dict needs: id, name, category_name (optional research_field).
+    """
+    if not subtopics:
+        return None
+    snippet = (text_snippet or "")[:3500]
+    client = _client()
+    lines = []
+    for s in subtopics:
+        cid = s.get("id", "")
+        nm = s.get("name", "")
+        cat = s.get("category_name", "")
+        rf = s.get("research_field") or ""
+        extra = f" [{rf}]" if rf else ""
+        lines.append(f"- id: {cid} | category: {cat} | subtopic: {nm}{extra}")
+    catalog = "\n".join(lines)
+
+    if not client:
+        return subtopics[0]["id"]
+
+    prompt = (
+        "You help file a research source into the best existing shelf.\n"
+        "Choose exactly one subtopic id from the list. Prefer semantic fit over name similarity.\n"
+        "Return JSON only: {\"subtopic_id\": \"<uuid>\", \"reason\": \"one short phrase\"}\n\n"
+        f"filename: {filename}\n"
+        f"excerpt:\n{snippet}\n\n"
+        f"Allowed subtopics:\n{catalog}\n"
+    )
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content or "{}"
+        data = json.loads(raw)
+        sid = (data.get("subtopic_id") or "").strip()
+        valid = {s["id"] for s in subtopics}
+        if sid in valid:
+            return sid
+    except (json.JSONDecodeError, Exception, KeyError):
+        pass
+    return subtopics[0]["id"]
+
+
+def infer_source_type(filename: str) -> str:
+    ext = ""
+    if "." in filename:
+        ext = filename.rsplit(".", 1)[-1].lower()
+    mapping = {
+        "pdf": "pdf",
+        "txt": "notes",
+        "docx": "article",
+        "md": "notes",
+    }
+    return mapping.get(ext, "other")

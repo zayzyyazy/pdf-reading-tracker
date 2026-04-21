@@ -5,6 +5,66 @@
   <p class="lede">Categories first, then subtopics, resources, questions, and writing — layered so you can browse, revisit, and deepen ideas over time.</p>
 </div>
 
+{% if has_subtopics %}
+<div class="card intake-card" id="dash-intake" style="margin-bottom:1.75rem">
+  <div class="row-between" style="align-items:center;margin-bottom:0.75rem">
+    <h2 style="margin:0;font-size:1.1rem;font-family:var(--font);font-weight:500">Quick add</h2>
+    <a class="button ghost" href="/intake" style="font-size:0.88rem">Full intake page</a>
+  </div>
+  <p class="muted" style="margin:0 0 0.75rem;font-size:0.92rem">Drop files here or use the full intake page for batch adds. Optional subtopic overrides smart placement.</p>
+  <div class="field" style="margin-bottom:0.75rem">
+    <label for="dash-subtopic">Prefer subtopic (optional)</label>
+    <select id="dash-subtopic">
+      <option value="">Suggest automatically</option>
+      {% for s in subtopics_flat %}
+      <option value="{{ s.id }}">{{ s.category_name }} — {{ s.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="dropzone" id="dash-drop" tabindex="0" aria-label="Drop files to add as resources">
+    <p class="dropzone-title">Drop PDF, TXT, or DOCX here</p>
+    <p class="muted" style="margin:0;font-size:0.88rem">Same flow as Add resources — no need to open a subtopic first</p>
+  </div>
+</div>
+<script>
+(function () {
+  var drop = document.getElementById("dash-drop");
+  var sub = document.getElementById("dash-subtopic");
+  if (!drop) return;
+  function postFiles(files) {
+    var fd = new FormData();
+    if (sub && sub.value) fd.append("subtopic_id", sub.value);
+    for (var i = 0; i < files.length; i++) fd.append("files", files[i]);
+    fetch("/intake", { method: "POST", body: fd, redirect: "manual" })
+      .then(function (r) {
+        if (r.status >= 300 && r.status < 400) {
+          var loc = r.headers.get("Location");
+          if (loc) { window.location = loc; return; }
+        }
+        if (!r.ok) alert("Intake failed (" + r.status + "). Use PDF, TXT, or DOCX.");
+      })
+      .catch(function () { alert("Upload failed."); });
+  }
+  ["dragenter", "dragover"].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) {
+      e.preventDefault();
+      drop.classList.add("dropzone-active");
+    });
+  });
+  ["dragleave", "drop"].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) {
+      e.preventDefault();
+      drop.classList.remove("dropzone-active");
+    });
+  });
+  drop.addEventListener("drop", function (e) {
+    var f = e.dataTransfer && e.dataTransfer.files;
+    if (f && f.length) postFiles(f);
+  });
+})();
+</script>
+{% endif %}
+
 <section class="section">
   <div class="row-between" style="margin-bottom:0.75rem">
     <h2>Categories</h2>

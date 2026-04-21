@@ -72,6 +72,56 @@ a:hover {
   color: var(--muted);
 }
 
+.nav-ai {
+  margin-left: 1rem;
+  font-size: 0.78rem;
+  color: var(--faint);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.pill-on {
+  background: #e4ede8;
+  color: #2d4a3e;
+}
+
+.pill-off {
+  background: #eceae6;
+  color: var(--muted);
+}
+
+.dropzone {
+  margin-top: 1rem;
+  padding: 1.75rem 1.25rem;
+  border: 1.5px dashed var(--border);
+  border-radius: var(--radius);
+  text-align: center;
+  background: var(--surface-muted);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.dropzone:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.dropzone-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.dropzone-title {
+  margin: 0 0 0.35rem;
+  font-family: var(--font);
+  font-size: 1.05rem;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.intake-card .field {
+  margin-bottom: 0.65rem;
+}
+
 .wrap {
   max-width: 1120px;
   margin: 0 auto;

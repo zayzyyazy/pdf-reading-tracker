@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <h1>Settings</h1>
+  <p class="lede">Local-only. Your key is stored in <code>data/app_settings.json</code> next to your workspace database (git-ignored). The CSV pipeline can still use <code>OPENAI_API_KEY</code> in the shell separately.</p>
+</div>
+
+<div class="card" style="max-width:36rem">
+  <h2 style="margin-top:0;font-family:var(--font);font-weight:500">OpenAI</h2>
+
+  <div class="ai-status-line" style="margin-bottom:1rem">
+    {% if ai.configured %}
+    <span class="pill pill-on">{{ ai.label }}</span>
+    <span class="muted">Model calls use GPT-4o-mini where implemented.</span>
+    {% else %}
+    <span class="pill pill-off">AI not configured</span>
+    <span class="muted">Summaries, placement, questions, and refinement use built-in fallbacks.</span>
+    {% endif %}
+  </div>
+
+  {% if ai.source == "env" and not has_saved_key %}
+  <p class="muted" style="font-size:0.9rem">A key is available from your environment. Saving below will store a key in this app (saved keys take precedence when present).</p>
+  {% endif %}
+
+  <form method="post" action="/settings/openai" class="stack" style="gap:0.75rem">
+    <div class="field">
+      <label for="api-key">API key</label>
+      <input id="api-key" name="api_key" type="password" autocomplete="off" placeholder="sk-…">
+      <p class="muted" style="margin:0.25rem 0 0;font-size:0.85rem">Paste to save or replace. Leave blank if you only want to remove the saved key (use the button below).</p>
+    </div>
+    <button class="primary" type="submit">Save key</button>
+  </form>
+
+  {% if has_saved_key %}
+  <form method="post" action="/settings/openai/remove" style="margin-top:1rem" onsubmit="return confirm('Remove the saved API key from this app?');">
+    <button type="submit" class="ghost danger">Remove saved key</button>
+  </form>
+  <p class="muted" style="margin-top:0.75rem;font-size:0.88rem">A key is on file (not shown). Save with a new value to rotate.</p>
+  {% endif %}
+</div>
+{% endblock %}

@@ -333,6 +333,26 @@ def list_subtopics_for_category(cat_id: str, parent_id: Optional[str] = None) ->
         return [row_to_dict(r) for r in rows]
 
 
+def list_subtopics_for_intake() -> list[dict[str, Any]]:
+    """All subtopics with category names for intake routing and dropdowns."""
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT s.id, s.name, s.research_field, s.category_id, s.parent_id,
+                      c.name AS category_name
+               FROM subtopics s
+               JOIN categories c ON c.id = s.category_id
+               ORDER BY c.sort_order ASC, c.name ASC, s.sort_order ASC, s.name ASC"""
+        ).fetchall()
+        return [row_to_dict(r) for r in rows]
+
+
+def first_subtopic_id() -> Optional[str]:
+    subs = list_subtopics_for_intake()
+    if not subs:
+        return None
+    return subs[0]["id"]
+
+
 def get_subtopic(sid: str) -> Optional[dict[str, Any]]:
     with connect() as conn:
         row = conn.execute("SELECT * FROM subtopics WHERE id = ?", (sid,)).fetchone()

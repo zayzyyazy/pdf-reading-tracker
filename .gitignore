@@ -22,6 +22,7 @@ output/
 # Research workspace local data
 data/research.sqlite
 data/workspace_uploads/
+data/app_settings.json
 
 # Tauri / Rust
 src-tauri/target/

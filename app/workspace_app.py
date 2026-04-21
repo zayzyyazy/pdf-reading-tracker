@@ -5,6 +5,7 @@ Run from repo root: python -m uvicorn app.workspace_app:app --reload --port 8765
 from __future__ import annotations
 
 import os
+import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -13,8 +14,9 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import research_db as db
 from app import research_ai
+from app import research_db as db
+from app import settings_store
 from app.pdf_reader import extract_text_from_docx, extract_text_from_pdf, extract_text_from_txt
 
 def _workspace_base_dir() -> str:
@@ -40,6 +42,13 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
 
+@app.middleware("http")
+async def attach_ai_status(request: Request, call_next):
+    request.state.ai_nav = settings_store.public_nav_hint()
+    request.state.ai_status = settings_store.openai_status()
+    return await call_next(request)
+
+
 def _extract_uploaded_text(path: str) -> str:
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
@@ -49,6 +58,46 @@ def _extract_uploaded_text(path: str) -> str:
     if ext == ".docx":
         return extract_text_from_docx(path) or ""
     return ""
+
+
+ALLOWED_INTAKE_EXT = {".pdf", ".txt", ".docx"}
+
+
+def ingest_resource_bytes(
+    subtopic_id: str,
+    filename: str,
+    content: bytes,
+    title: str = "",
+    summary: str = "",
+    notes: str = "",
+    source_type: str = "",
+) -> str:
+    """
+    Save bytes as a resource under subtopic_id, extract text, fill title/summary when empty.
+    Returns new resource id.
+    """
+    if not db.get_subtopic(subtopic_id):
+        raise HTTPException(404, "Subtopic not found")
+    raw_name = os.path.basename(filename or "upload")
+    ext = os.path.splitext(raw_name)[1].lower()
+    if ext not in ALLOWED_INTAKE_EXT:
+        raise HTTPException(400, f"Unsupported file type {ext or '(none)'}. Use PDF, TXT, or DOCX.")
+    stype = (source_type or "").strip() or research_ai.infer_source_type(raw_name)
+    initial_title = (title or "").strip() or raw_name
+    rid = db.create_resource(subtopic_id, initial_title, stype, None, (summary or "").strip(), (notes or "").strip())
+    stored = f"{rid}{ext}"
+    dest = os.path.join(db.UPLOADS_DIR, stored)
+    os.makedirs(db.UPLOADS_DIR, exist_ok=True)
+    with open(dest, "wb") as f:
+        f.write(content)
+    db.set_resource_file_path(rid, os.path.relpath(dest, BASE_DIR))
+    text = _extract_uploaded_text(dest)
+    if text.strip():
+        meta = research_ai.summarize_for_resource(text)
+        new_title = (title or "").strip() or meta.get("title") or initial_title
+        new_summary = (summary or "").strip() or meta.get("summary") or ""
+        db.update_resource(rid, title=new_title, summary=new_summary, source_type=stype)
+    return rid
 
 
 @app.get("/")
@@ -67,8 +116,116 @@ def dashboard(request: Request):
             "recent_resources": db.recent_resources(8),
             "recent_writings": db.recent_writings(6),
             "open_questions": db.open_questions_globally(12),
+            "subtopics_flat": db.list_subtopics_for_intake(),
+            "has_subtopics": bool(db.list_subtopics_for_intake()),
         },
     )
+
+
+@app.get("/settings")
+def settings_page(request: Request):
+    st = settings_store.openai_status()
+    saved = settings_store.get_saved_openai_key()
+    return templates.TemplateResponse(
+        request,
+        "settings.html",
+        {
+            "title": "Settings",
+            "ai": st,
+            "has_saved_key": bool(saved),
+        },
+    )
+
+
+@app.post("/settings/openai")
+def settings_openai_save(api_key: str = Form("")):
+    key = (api_key or "").strip()
+    if not key:
+        return RedirectResponse(url="/settings", status_code=303)
+    settings_store.set_openai_api_key(key)
+    return RedirectResponse(url="/settings", status_code=303)
+
+
+@app.post("/settings/openai/remove")
+def settings_openai_remove():
+    settings_store.clear_openai_api_key()
+    return RedirectResponse(url="/settings", status_code=303)
+
+
+@app.get("/intake")
+def intake_page(request: Request, subtopic_id: str = ""):
+    subs = db.list_subtopics_for_intake()
+    st = settings_store.openai_status()
+    pre = (subtopic_id or "").strip()
+    if pre and not db.get_subtopic(pre):
+        pre = ""
+    return templates.TemplateResponse(
+        request,
+        "intake.html",
+        {
+            "title": "Add resources",
+            "subtopics": subs,
+            "ai": st,
+            "has_subtopics": len(subs) > 0,
+            "prefill_subtopic": pre,
+        },
+    )
+
+
+@app.post("/intake")
+async def intake_post(request: Request):
+    form = await request.form()
+    subtopic_choice = (form.get("subtopic_id") or "").strip()
+    uploads = list(form.getlist("files"))
+    if not uploads:
+        one = form.get("file")
+        if one is not None:
+            uploads = [one]
+    if not uploads:
+        raise HTTPException(400, "No files received")
+
+    subs = db.list_subtopics_for_intake()
+    if not subs:
+        raise HTTPException(400, "Create at least one category and subtopic before adding files.")
+
+    last_rid: Optional[str] = None
+
+    for up in uploads:
+        if not hasattr(up, "read"):
+            continue
+        raw_name = os.path.basename(getattr(up, "filename", None) or "file")
+        ext = os.path.splitext(raw_name)[1].lower()
+        if ext not in ALLOWED_INTAKE_EXT:
+            continue
+        content = await up.read()
+        if not content:
+            continue
+
+        os.makedirs(db.UPLOADS_DIR, exist_ok=True)
+        tmp = os.path.join(db.UPLOADS_DIR, f"_intake_{uuid.uuid4().hex}{ext}")
+        text = ""
+        try:
+            with open(tmp, "wb") as f:
+                f.write(content)
+            text = _extract_uploaded_text(tmp)
+        finally:
+            if os.path.isfile(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+
+        sid = subtopic_choice if subtopic_choice and db.get_subtopic(subtopic_choice) else ""
+        if not sid:
+            sid = research_ai.suggest_subtopic_for_resource(text, raw_name, subs) or subs[0]["id"]
+
+        rid = ingest_resource_bytes(sid, raw_name, content)
+        last_rid = rid
+
+    if not last_rid:
+        raise HTTPException(400, "No supported files (PDF, TXT, DOCX) were processed.")
+
+    return RedirectResponse(url=f"/resources/{last_rid}", status_code=303)
 
 
 @app.post("/categories/new")
@@ -193,26 +350,29 @@ async def resource_create(
     notes: str = Form(""),
     file: Optional[UploadFile] = File(default=None),
 ):
-    st = db.get_subtopic(subtopic_id)
-    if not st:
+    if not db.get_subtopic(subtopic_id):
         raise HTTPException(404)
-    rid = db.create_resource(subtopic_id, title or "Untitled resource", source_type, None, summary, notes)
     if file and file.filename:
         raw_name = os.path.basename(file.filename)
-        ext = os.path.splitext(raw_name)[1].lower()
-        stored = f"{rid}{ext}" if ext else rid
-        dest = os.path.join(db.UPLOADS_DIR, stored)
-        os.makedirs(db.UPLOADS_DIR, exist_ok=True)
         content = await file.read()
-        with open(dest, "wb") as f:
-            f.write(content)
-        db.set_resource_file_path(rid, os.path.relpath(dest, BASE_DIR))
-        text = _extract_uploaded_text(dest)
-        if text.strip() and (not summary.strip() or not title.strip()):
-            meta = research_ai.summarize_for_resource(text)
-            new_title = title.strip() or meta["title"]
-            new_summary = summary.strip() or meta["summary"]
-            db.update_resource(rid, title=new_title, summary=new_summary)
+        rid = ingest_resource_bytes(
+            subtopic_id,
+            raw_name,
+            content,
+            title=title,
+            summary=summary,
+            notes=notes,
+            source_type=source_type,
+        )
+        return RedirectResponse(url=f"/resources/{rid}", status_code=303)
+    rid = db.create_resource(
+        subtopic_id,
+        (title or "").strip() or "Untitled resource",
+        source_type or "other",
+        None,
+        (summary or "").strip(),
+        (notes or "").strip(),
+    )
     return RedirectResponse(url=f"/resources/{rid}", status_code=303)
 
 
