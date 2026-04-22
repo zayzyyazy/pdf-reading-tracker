@@ -93,6 +93,7 @@ def init_db() -> None:
                 file_path TEXT,
                 summary TEXT,
                 notes TEXT,
+                placement_note TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (subtopic_id) REFERENCES subtopics(id) ON DELETE CASCADE
@@ -143,9 +144,21 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_questions_resource ON questions(resource_id);
             CREATE INDEX IF NOT EXISTS idx_writings_subtopic ON writings(subtopic_id);
             CREATE INDEX IF NOT EXISTS idx_deep_dives_subtopic ON deep_dives(subtopic_id);
+
+            CREATE TABLE IF NOT EXISTS resource_deep_dives (
+                id TEXT PRIMARY KEY,
+                resource_id TEXT NOT NULL UNIQUE,
+                payload_json TEXT NOT NULL,
+                source_digest TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (resource_id) REFERENCES resources(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_resource_deep_dives_resource ON resource_deep_dives(resource_id);
             """
         )
         _ensure_writings_refined_column(conn)
+        _ensure_resources_placement_note_column(conn)
     seed_if_empty()
 
 
@@ -154,6 +167,13 @@ def _ensure_writings_refined_column(conn: sqlite3.Connection) -> None:
     cols = {row[1] for row in cur.fetchall()}
     if "refined_suggestion" not in cols:
         conn.execute("ALTER TABLE writings ADD COLUMN refined_suggestion TEXT")
+
+
+def _ensure_resources_placement_note_column(conn: sqlite3.Connection) -> None:
+    cur = conn.execute("PRAGMA table_info(resources)")
+    cols = {row[1] for row in cur.fetchall()}
+    if "placement_note" not in cols:
+        conn.execute("ALTER TABLE resources ADD COLUMN placement_note TEXT")
 
 
 def seed_if_empty() -> None:
@@ -460,15 +480,27 @@ def create_resource(
     file_path: Optional[str] = None,
     summary: str = "",
     notes: str = "",
+    placement_note: str = "",
 ) -> str:
     rid = _uid()
     ts = _now()
     with connect() as conn:
         conn.execute(
             """INSERT INTO resources
-            (id, subtopic_id, title, source_type, file_path, summary, notes, created_at, updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?)""",
-            (rid, subtopic_id, title.strip(), source_type.strip() or "other", file_path, summary or None, notes or None, ts, ts),
+            (id, subtopic_id, title, source_type, file_path, summary, notes, placement_note, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                rid,
+                subtopic_id,
+                title.strip(),
+                source_type.strip() or "other",
+                file_path,
+                summary or None,
+                notes or None,
+                placement_note.strip() or None,
+                ts,
+                ts,
+            ),
         )
     return rid
 
@@ -479,6 +511,7 @@ def update_resource(
     source_type: Optional[str] = None,
     summary: Optional[str] = None,
     notes: Optional[str] = None,
+    placement_note: Optional[str] = None,
 ) -> None:
     ts = _now()
     cur = get_resource(rid)
@@ -491,6 +524,7 @@ def update_resource(
             source_type = COALESCE(?, source_type),
             summary = COALESCE(?, summary),
             notes = COALESCE(?, notes),
+            placement_note = COALESCE(?, placement_note),
             updated_at = ?
             WHERE id = ?""",
             (
@@ -498,6 +532,7 @@ def update_resource(
                 source_type,
                 summary,
                 notes,
+                placement_note,
                 ts,
                 rid,
             ),
@@ -809,5 +844,48 @@ def upsert_deep_dive_for_subtopic(subtopic_id: str, payload: dict[str, Any], sou
             (id, subtopic_id, payload_json, source_digest, created_at, updated_at)
             VALUES (?,?,?,?,?,?)""",
             (did, subtopic_id, payload_json, source_digest or None, ts, ts),
+        )
+    return did
+
+
+def get_resource_deep_dive(resource_id: str) -> Optional[dict[str, Any]]:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM resource_deep_dives WHERE resource_id = ?",
+            (resource_id,),
+        ).fetchone()
+        if not row:
+            return None
+        out = row_to_dict(row)
+        try:
+            out["payload"] = json.loads(out.get("payload_json") or "{}")
+        except json.JSONDecodeError:
+            out["payload"] = {}
+        return out
+
+
+def upsert_resource_deep_dive(resource_id: str, payload: dict[str, Any], source_digest: str = "") -> str:
+    did = _uid()
+    ts = _now()
+    payload_json = json.dumps(payload, ensure_ascii=True)
+    with connect() as conn:
+        existing = conn.execute(
+            "SELECT id, created_at FROM resource_deep_dives WHERE resource_id = ?",
+            (resource_id,),
+        ).fetchone()
+        if existing:
+            did = existing["id"]
+            conn.execute(
+                """UPDATE resource_deep_dives
+                SET payload_json = ?, source_digest = ?, updated_at = ?
+                WHERE id = ?""",
+                (payload_json, source_digest or None, ts, did),
+            )
+            return did
+        conn.execute(
+            """INSERT INTO resource_deep_dives
+            (id, resource_id, payload_json, source_digest, created_at, updated_at)
+            VALUES (?,?,?,?,?,?)""",
+            (did, resource_id, payload_json, source_digest or None, ts, ts),
         )
     return did

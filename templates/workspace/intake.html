@@ -2,7 +2,7 @@
 {% block content %}
 <div class="page-head">
   <h1>Add resources</h1>
-  <p class="lede">Drop PDFs, text files, or Word documents. If you do not pick a subtopic, the app suggests one from your existing shelves (OpenAI when configured, otherwise the first subtopic).</p>
+  <p class="lede">Drop PDFs, text files, or Word documents. If you do not pick a subtopic, the app routes intelligently: reuse an existing shelf, create a new subtopic in the right category, or create a new category when needed.</p>
 </div>
 
 {% if not has_subtopics %}
@@ -18,7 +18,7 @@
     <span class="pill pill-on">AI placement on</span>
     {% else %}
     <span class="pill pill-off">AI placement off</span>
-    <span class="muted" style="margin-left:0.35rem">Files go to your first subtopic unless you choose below.</span>
+    <span class="muted" style="margin-left:0.35rem">Uses local routing heuristics and still expands structure when needed.</span>
     {% endif %}
   </div>
 

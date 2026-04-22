@@ -47,6 +47,46 @@ def _offline_subtopic_suggestions(category_name: str) -> list[str]:
     ]
 
 
+def _clean_label(value: str, fallback: str, max_len: int = 64) -> str:
+    txt = " ".join((value or "").strip().split())
+    if not txt:
+        txt = fallback
+    if len(txt) > max_len:
+        txt = txt[:max_len].rstrip(" -_,.;:")
+    return txt
+
+
+def _label_from_snippet(snippet: str, fallback: str = "New inquiry") -> str:
+    stop = {
+        "the",
+        "and",
+        "for",
+        "with",
+        "into",
+        "from",
+        "that",
+        "this",
+        "about",
+        "through",
+        "across",
+        "between",
+        "your",
+        "their",
+        "resource",
+    }
+    words = []
+    for raw in (snippet or "").replace("\n", " ").split():
+        token = "".join(ch for ch in raw.lower() if ch.isalpha())
+        if len(token) < 4 or token in stop:
+            continue
+        words.append(token)
+        if len(words) == 3:
+            break
+    if not words:
+        return fallback
+    return " ".join(w.capitalize() for w in words)
+
+
 def summarize_for_resource(text: str, max_chars: int = 4000) -> dict[str, str]:
     """Return title + summary from raw extracted text."""
     snippet = (text or "")[:max_chars]
@@ -241,6 +281,172 @@ def infer_source_type(filename: str) -> str:
         "md": "notes",
     }
     return mapping.get(ext, "other")
+
+
+def decide_resource_placement(
+    text_snippet: str,
+    filename: str,
+    categories: list[dict[str, Any]],
+    subtopics: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """
+    Decide whether to place in existing subtopic, create subtopic, or create category+subtopic.
+    """
+    if not subtopics:
+        cat_name = _clean_label(_label_from_snippet(text_snippet), "New research area", 44)
+        return {
+            "action": "new_category",
+            "category_name": cat_name,
+            "category_description": "Auto-created from intake because no existing category matched.",
+            "subtopic_name": "Core questions",
+            "research_field": "",
+            "topic_summary": "",
+            "reason": "No existing structure available.",
+        }
+    snippet = (text_snippet or "")[:3800]
+    client = _client()
+    cats = [{"id": c.get("id"), "name": c.get("name"), "description": c.get("description") or ""} for c in categories]
+    subs = []
+    by_cat = {c.get("id"): c.get("name") for c in categories}
+    for s in subtopics:
+        subs.append(
+            {
+                "id": s.get("id"),
+                "name": s.get("name"),
+                "category_id": s.get("category_id"),
+                "category_name": s.get("category_name") or by_cat.get(s.get("category_id"), ""),
+                "research_field": s.get("research_field") or "",
+            }
+        )
+    if not client:
+        return _offline_placement_decision(filename, snippet, cats, subs)
+
+    prompt = (
+        "You are routing one research resource into an evolving knowledge map.\n"
+        "Choose ONE action: existing_subtopic, new_subtopic, new_category.\n"
+        "Conservative rule: prefer existing_subtopic unless mismatch is clear.\n"
+        "If a category fits but subtopic missing, choose new_subtopic.\n"
+        "Only choose new_category when existing categories are meaningfully wrong.\n"
+        "Naming rules: specific, concise, non-generic, not overlong, not awkward.\n"
+        "Return JSON only with keys:\n"
+        "{"
+        '"action":"existing_subtopic|new_subtopic|new_category",'
+        '"existing_subtopic_id":"",'
+        '"existing_category_id":"",'
+        '"category_name":"",'
+        '"category_description":"",'
+        '"subtopic_name":"",'
+        '"research_field":"",'
+        '"topic_summary":"",'
+        '"reason":"one short sentence"'
+        "}\n\n"
+        f"filename: {filename}\n"
+        f"text excerpt:\n{snippet}\n\n"
+        f"Categories JSON:\n{json.dumps(cats, ensure_ascii=True)}\n\n"
+        f"Subtopics JSON:\n{json.dumps(subs, ensure_ascii=True)}\n"
+    )
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content or "{}"
+        data = json.loads(raw)
+        return _normalize_placement_decision(data, cats, subs, filename, snippet)
+    except (json.JSONDecodeError, Exception):
+        return _offline_placement_decision(filename, snippet, cats, subs)
+
+
+def _normalize_placement_decision(
+    data: dict[str, Any],
+    categories: list[dict[str, Any]],
+    subtopics: list[dict[str, Any]],
+    filename: str,
+    snippet: str,
+) -> dict[str, Any]:
+    valid_sub = {s["id"] for s in subtopics if s.get("id")}
+    valid_cat = {c["id"] for c in categories if c.get("id")}
+    action = str(data.get("action") or "").strip().lower()
+    if action not in {"existing_subtopic", "new_subtopic", "new_category"}:
+        return _offline_placement_decision(filename, snippet, categories, subtopics)
+    result = {
+        "action": action,
+        "existing_subtopic_id": str(data.get("existing_subtopic_id") or "").strip(),
+        "existing_category_id": str(data.get("existing_category_id") or "").strip(),
+        "category_name": _clean_label(str(data.get("category_name") or ""), "New area", 52),
+        "category_description": _clean_label(str(data.get("category_description") or ""), "", 180),
+        "subtopic_name": _clean_label(str(data.get("subtopic_name") or ""), "Core threads", 56),
+        "research_field": _clean_label(str(data.get("research_field") or ""), "", 60),
+        "topic_summary": _clean_label(str(data.get("topic_summary") or ""), "", 220),
+        "reason": _clean_label(str(data.get("reason") or ""), "Auto-routed by model.", 180),
+    }
+    if action == "existing_subtopic":
+        if result["existing_subtopic_id"] not in valid_sub:
+            return _offline_placement_decision(filename, snippet, categories, subtopics)
+        return result
+    if action == "new_subtopic":
+        if result["existing_category_id"] not in valid_cat:
+            return _offline_placement_decision(filename, snippet, categories, subtopics)
+        return result
+    return result
+
+
+def _offline_placement_decision(
+    filename: str,
+    snippet: str,
+    categories: list[dict[str, Any]],
+    subtopics: list[dict[str, Any]],
+) -> dict[str, Any]:
+    lower = (snippet[:1400] or "").lower()
+    best = None
+    best_score = -1
+    for s in subtopics:
+        score = 0
+        for token in (s.get("name") or "").lower().split():
+            if len(token) > 3 and token in lower:
+                score += 2
+        for token in (s.get("category_name") or "").lower().split():
+            if len(token) > 3 and token in lower:
+                score += 1
+        if score > best_score:
+            best = s
+            best_score = score
+    if best and best_score >= 3:
+        return {
+            "action": "existing_subtopic",
+            "existing_subtopic_id": best["id"],
+            "reason": "Matched existing subtopic by keyword overlap.",
+        }
+    cat = None
+    cat_score = -1
+    for c in categories:
+        score = 0
+        for token in (c.get("name") or "").lower().split():
+            if len(token) > 3 and token in lower:
+                score += 1
+        if score > cat_score:
+            cat = c
+            cat_score = score
+    base = _clean_label(_label_from_snippet(snippet, filename.rsplit(".", 1)[0].replace("_", " ")), "New inquiry", 44)
+    if cat and cat_score >= 1:
+        return {
+            "action": "new_subtopic",
+            "existing_category_id": cat["id"],
+            "subtopic_name": f"{base} perspectives",
+            "research_field": "",
+            "topic_summary": "Auto-created because this resource did not fit an existing subtopic cleanly.",
+            "reason": "Category matched; subtopic appears missing.",
+        }
+    return {
+        "action": "new_category",
+        "category_name": f"{base} studies",
+        "category_description": "Auto-created from intake because existing categories did not fit.",
+        "subtopic_name": "Core questions",
+        "research_field": "",
+        "topic_summary": "Initial shelf generated from resource intake.",
+        "reason": "No strong existing category match.",
+    }
 
 
 def build_deep_dive(
@@ -439,5 +645,114 @@ def _offline_deep_dive(
         "field_framing": "This deep dive is generated in local-first fallback mode; refine after adding richer source summaries.",
         "writing_angles": writing_angles,
         "next_questions": next_questions,
+        "source_digest": source_digest,
+    }
+
+
+def build_resource_deep_dive(
+    resource: dict[str, Any],
+    subtopic: dict[str, Any],
+    questions: list[dict[str, Any]],
+    excerpt: str = "",
+) -> dict[str, Any]:
+    source_digest = resource_deep_dive_source_digest(resource, questions)
+    question_lines = [str(q.get("body") or "").strip() for q in questions if str(q.get("body") or "").strip()]
+    client = _client()
+    if not client:
+        return _offline_resource_deep_dive(resource, subtopic, question_lines, source_digest)
+    prompt = (
+        "Create a serious deep dive for a single research resource.\n"
+        "Ground claims in the provided title/summary/notes/questions/excerpt.\n"
+        "Avoid generic prose.\n"
+        "Return JSON with keys only:\n"
+        "{"
+        '"resource_overview":"3-6 sentences",'
+        '"strongest_ideas":["..."],'
+        '"assumptions":["..."],'
+        '"tensions_and_angles":["..."],'
+        '"key_concepts":["term: why it matters"],'
+        '"writing_angles":["..."],'
+        '"next_questions":["..."]'
+        "}\n\n"
+        f"resource title: {resource.get('title') or ''}\n"
+        f"source type: {resource.get('source_type') or ''}\n"
+        f"subtopic: {subtopic.get('name') or ''}\n"
+        f"summary: {resource.get('summary') or ''}\n"
+        f"notes: {resource.get('notes') or ''}\n"
+        f"questions: {json.dumps(question_lines[:12], ensure_ascii=True)}\n"
+        f"excerpt: {(excerpt or '')[:5000]}\n"
+    )
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content or "{}"
+        data = json.loads(raw)
+        return {
+            "resource_overview": _clean_label(str(data.get("resource_overview") or ""), "No overview available yet.", 900),
+            "strongest_ideas": _as_clean_list(data.get("strongest_ideas"), ["Identify the central claim and strongest support."]),
+            "assumptions": _as_clean_list(data.get("assumptions"), ["What assumptions does this resource rely on?"]),
+            "tensions_and_angles": _as_clean_list(data.get("tensions_and_angles"), ["Where does this resource conflict with alternatives?"]),
+            "key_concepts": _as_clean_list(data.get("key_concepts"), []),
+            "writing_angles": _as_clean_list(data.get("writing_angles"), ["Write a response testing this resource's strongest claim."]),
+            "next_questions": _as_clean_list(data.get("next_questions"), question_lines[:4] or ["What would change your view of this resource?"]),
+            "source_digest": source_digest,
+        }
+    except (json.JSONDecodeError, Exception):
+        return _offline_resource_deep_dive(resource, subtopic, question_lines, source_digest)
+
+
+def _as_clean_list(value: Any, fallback: list[str]) -> list[str]:
+    if not isinstance(value, list):
+        return fallback
+    out = [_clean_label(str(v), "", 220) for v in value]
+    out = [x for x in out if x]
+    return out if out else fallback
+
+
+def resource_deep_dive_source_digest(resource: dict[str, Any], questions: list[dict[str, Any]]) -> str:
+    source_blob = json.dumps(
+        {
+            "resource": {
+                "id": resource.get("id"),
+                "title": resource.get("title"),
+                "source_type": resource.get("source_type"),
+                "summary": resource.get("summary"),
+                "notes": resource.get("notes"),
+                "updated_at": resource.get("updated_at"),
+            },
+            "questions": [
+                {"id": q.get("id"), "body": q.get("body"), "explored": bool(q.get("explored"))}
+                for q in questions
+            ],
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+    )
+    return hashlib.sha256(source_blob.encode("utf-8")).hexdigest()
+
+
+def _offline_resource_deep_dive(
+    resource: dict[str, Any],
+    subtopic: dict[str, Any],
+    question_lines: list[str],
+    source_digest: str,
+) -> dict[str, Any]:
+    title = resource.get("title") or "Untitled resource"
+    summary = (resource.get("summary") or "").strip()
+    notes = (resource.get("notes") or "").strip()
+    overview = f"{title} sits inside '{subtopic.get('name') or 'this subtopic'}' and should be read as a standalone argument."
+    if summary:
+        overview += f" Summary signal: {summary[:320]}"
+    return {
+        "resource_overview": overview,
+        "strongest_ideas": [summary[:220]] if summary else ["Extract the strongest thesis this source defends."],
+        "assumptions": [notes[:220]] if notes else ["Identify hidden assumptions and boundary conditions."],
+        "tensions_and_angles": ["Compare this source's stance against at least one contrasting resource."],
+        "key_concepts": [],
+        "writing_angles": ["Write a brief for and against the main claim in this resource."],
+        "next_questions": question_lines[:5] or ["What evidence would most strengthen or weaken this resource?"],
         "source_digest": source_digest,
     }

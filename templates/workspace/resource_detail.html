@@ -15,6 +15,9 @@
     <a class="button" href="/files/resource/{{ resource.id }}">Download file</a>
     {% endif %}
   </div>
+  {% if resource.placement_note %}
+  <p class="tag" style="margin-top:0.45rem">{{ resource.placement_note }}</p>
+  {% endif %}
 </div>
 
 <div class="split">
@@ -34,6 +37,72 @@
       <p style="white-space:pre-wrap;margin:0">{{ resource.notes }}</p>
       {% else %}
       <p class="muted">No notes yet.</p>
+      {% endif %}
+    </div>
+
+    <div class="card deep-dive-card">
+      <div class="row-between deep-dive-head">
+        <div>
+          <h3 style="margin:0">Resource deep dive</h3>
+          {% if resource_deep_dive %}
+          <div class="tag">Updated {{ resource_deep_dive.updated_at[:16] }}</div>
+          {% endif %}
+        </div>
+        <form method="post" action="/resources/{{ resource.id }}/deep-dive/generate" style="margin:0">
+          <button class="primary" type="submit">{% if resource_deep_dive %}Regenerate deep dive{% else %}Generate deep dive{% endif %}</button>
+        </form>
+      </div>
+      {% if resource_deep_dive_stale %}
+      <p class="muted" style="margin-top:0.75rem">This deep dive is stale because resource content or linked questions changed.</p>
+      {% endif %}
+      {% if resource_deep_dive and resource_deep_dive.payload %}
+      {% set rdd = resource_deep_dive.payload %}
+      <div class="deep-dive-sections">
+        <section>
+          <h3>Overview</h3>
+          <p>{{ rdd.resource_overview }}</p>
+        </section>
+        <section>
+          <h3>Strongest ideas</h3>
+          <ul class="list compact">
+            {% for item in rdd.strongest_ideas or [] %}<li>{{ item }}</li>{% endfor %}
+          </ul>
+        </section>
+        <section>
+          <h3>Assumptions</h3>
+          <ul class="list compact">
+            {% for item in rdd.assumptions or [] %}<li>{{ item }}</li>{% endfor %}
+          </ul>
+        </section>
+        <section>
+          <h3>Tensions and interesting angles</h3>
+          <ul class="list compact">
+            {% for item in rdd.tensions_and_angles or [] %}<li>{{ item }}</li>{% endfor %}
+          </ul>
+        </section>
+        {% if rdd.key_concepts %}
+        <section>
+          <h3>Key concepts</h3>
+          <ul class="list compact">
+            {% for item in rdd.key_concepts %}<li>{{ item }}</li>{% endfor %}
+          </ul>
+        </section>
+        {% endif %}
+        <section>
+          <h3>Writing and opinion angles</h3>
+          <ul class="list compact">
+            {% for item in rdd.writing_angles or [] %}<li>{{ item }}</li>{% endfor %}
+          </ul>
+        </section>
+        <section>
+          <h3>Next exploration questions</h3>
+          <ul class="list compact">
+            {% for item in rdd.next_questions or [] %}<li>{{ item }}</li>{% endfor %}
+          </ul>
+        </section>
+      </div>
+      {% else %}
+      <p class="muted" style="margin-top:0.75rem">No deep dive yet. Generate one to build a serious understanding layer for this single resource.</p>
       {% endif %}
     </div>
 

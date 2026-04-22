@@ -71,6 +71,7 @@ def ingest_resource_bytes(
     summary: str = "",
     notes: str = "",
     source_type: str = "",
+    placement_note: str = "",
 ) -> str:
     """
     Save bytes as a resource under subtopic_id, extract text, fill title/summary when empty.
@@ -84,7 +85,15 @@ def ingest_resource_bytes(
         raise HTTPException(400, f"Unsupported file type {ext or '(none)'}. Use PDF, TXT, or DOCX.")
     stype = (source_type or "").strip() or research_ai.infer_source_type(raw_name)
     initial_title = (title or "").strip() or raw_name
-    rid = db.create_resource(subtopic_id, initial_title, stype, None, (summary or "").strip(), (notes or "").strip())
+    rid = db.create_resource(
+        subtopic_id,
+        initial_title,
+        stype,
+        None,
+        (summary or "").strip(),
+        (notes or "").strip(),
+        placement_note=(placement_note or "").strip(),
+    )
     stored = f"{rid}{ext}"
     dest = os.path.join(db.UPLOADS_DIR, stored)
     os.makedirs(db.UPLOADS_DIR, exist_ok=True)
@@ -208,6 +217,11 @@ async def intake_post(request: Request):
             with open(tmp, "wb") as f:
                 f.write(content)
             text = _extract_uploaded_text(tmp)
+            if not text.strip() and ext == ".txt":
+                try:
+                    text = content.decode("utf-8", errors="ignore")
+                except Exception:
+                    text = ""
         finally:
             if os.path.isfile(tmp):
                 try:
@@ -216,10 +230,10 @@ async def intake_post(request: Request):
                     pass
 
         sid = subtopic_choice if subtopic_choice and db.get_subtopic(subtopic_choice) else ""
+        placement_note = ""
         if not sid:
-            sid = research_ai.suggest_subtopic_for_resource(text, raw_name, subs) or subs[0]["id"]
-
-        rid = ingest_resource_bytes(sid, raw_name, content)
+            sid, placement_note = _auto_route_subtopic_for_resource(text, raw_name)
+        rid = ingest_resource_bytes(sid, raw_name, content, placement_note=placement_note)
         last_rid = rid
 
     if not last_rid:
@@ -393,6 +407,48 @@ async def resource_create(
     return RedirectResponse(url=f"/resources/{rid}", status_code=303)
 
 
+def _auto_route_subtopic_for_resource(text: str, filename: str) -> tuple[str, str]:
+    cats = db.list_categories()
+    subs = db.list_subtopics_for_intake()
+    decision = research_ai.decide_resource_placement(text, filename, cats, subs)
+    action = decision.get("action")
+    if action == "existing_subtopic":
+        sid = decision.get("existing_subtopic_id", "")
+        st = db.get_subtopic(sid)
+        if st:
+            return sid, f"Joined existing subtopic: {st.get('name')}. {decision.get('reason', '').strip()}".strip()
+    if action == "new_subtopic":
+        cat_id = decision.get("existing_category_id", "")
+        if db.get_category(cat_id):
+            sub_name = (decision.get("subtopic_name") or "").strip() or "Core threads"
+            sid = db.create_subtopic(
+                cat_id,
+                sub_name,
+                None,
+                decision.get("research_field", ""),
+                decision.get("topic_summary", ""),
+            )
+            cat = db.get_category(cat_id)
+            return sid, f"Created new subtopic '{sub_name}' in category '{cat.get('name')}'."
+    if action == "new_category":
+        category_name = (decision.get("category_name") or "").strip() or "New research area"
+        category_desc = (decision.get("category_description") or "").strip()
+        cat_id = db.create_category(category_name, category_desc)
+        sub_name = (decision.get("subtopic_name") or "").strip() or "Core threads"
+        sid = db.create_subtopic(
+            cat_id,
+            sub_name,
+            None,
+            decision.get("research_field", ""),
+            decision.get("topic_summary", ""),
+        )
+        return sid, f"Created new category '{category_name}' and new subtopic '{sub_name}'."
+    first_sid = db.first_subtopic_id()
+    if not first_sid:
+        raise HTTPException(400, "No subtopic available for intake placement.")
+    return first_sid, "Placed in first available subtopic as fallback."
+
+
 @app.get("/resources/{rid}")
 def resource_detail(request: Request, rid: str):
     r = db.get_resource(rid)
@@ -403,6 +459,9 @@ def resource_detail(request: Request, rid: str):
         raise HTTPException(404)
     cat = db.get_category(st["category_id"])
     qs = db.list_questions_for_resource(rid)
+    resource_deep_dive = db.get_resource_deep_dive(rid)
+    resource_digest = research_ai.resource_deep_dive_source_digest(r, qs)
+    resource_deep_dive_stale = bool(resource_deep_dive and resource_deep_dive.get("source_digest") != resource_digest)
     return templates.TemplateResponse(
         request,
         "resource_detail.html",
@@ -413,6 +472,8 @@ def resource_detail(request: Request, rid: str):
             "breadcrumb": db.subtopic_breadcrumb(st["id"]),
             "resource": r,
             "questions": qs,
+            "resource_deep_dive": resource_deep_dive,
+            "resource_deep_dive_stale": resource_deep_dive_stale,
         },
     )
 
@@ -428,6 +489,25 @@ def resource_edit(
     if not db.get_resource(rid):
         raise HTTPException(404)
     db.update_resource(rid, title=title, source_type=source_type, summary=summary, notes=notes)
+    return RedirectResponse(url=f"/resources/{rid}", status_code=303)
+
+
+@app.post("/resources/{rid}/deep-dive/generate")
+def resource_generate_deep_dive(rid: str):
+    r = db.get_resource(rid)
+    if not r:
+        raise HTTPException(404)
+    st = db.get_subtopic(r["subtopic_id"])
+    if not st:
+        raise HTTPException(404)
+    qs = db.list_questions_for_resource(rid)
+    excerpt = ""
+    if r.get("file_path"):
+        fp = os.path.join(BASE_DIR, r["file_path"])
+        if os.path.isfile(fp):
+            excerpt = _extract_uploaded_text(fp)[:5000]
+    payload = research_ai.build_resource_deep_dive(r, st, qs, excerpt=excerpt)
+    db.upsert_resource_deep_dive(rid, payload, source_digest=payload.get("source_digest", ""))
     return RedirectResponse(url=f"/resources/{rid}", status_code=303)
 
 
