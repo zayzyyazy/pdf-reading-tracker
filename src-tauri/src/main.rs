@@ -124,12 +124,49 @@ fn read_stderr_head(child: &mut Child, max: usize) -> String {
     out.trim().to_string()
 }
 
+fn is_executable_file(path: &PathBuf) -> bool {
+    std::fs::metadata(path).map(|m| m.is_file()).unwrap_or(false)
+}
+
+fn resolve_python_interpreter(root: &PathBuf) -> Result<PathBuf, String> {
+    if let Ok(explicit) = std::env::var("RESEARCH_WORKSPACE_PYTHON") {
+        let p = PathBuf::from(explicit);
+        if is_executable_file(&p) {
+            return Ok(p);
+        }
+        return Err(format!(
+            "RESEARCH_WORKSPACE_PYTHON is set, but not executable: {}",
+            p.display()
+        ));
+    }
+
+    let candidates = [
+        root.join(".venv/bin/python3"),
+        root.join(".venv/bin/python"),
+    ];
+    for candidate in candidates {
+        if is_executable_file(&candidate) {
+            return Ok(candidate);
+        }
+    }
+
+    Err(format!(
+        "Could not find a project Python interpreter.\nExpected one of:\n  {}\n  {}\n\nCreate the project venv and install dependencies before launching the desktop app.",
+        root.join(".venv/bin/python3").display(),
+        root.join(".venv/bin/python").display()
+    ))
+}
+
 fn spawn_server(root: &PathBuf, data: &PathBuf, port: u16) -> Result<Child, String> {
     let sqlite = data.join("research.sqlite");
     let uploads = data.join("workspace_uploads");
     std::fs::create_dir_all(&uploads).map_err(|e| format!("Could not create uploads dir: {e}"))?;
 
-    let python = std::env::var("RESEARCH_WORKSPACE_PYTHON").unwrap_or_else(|_| "python3".into());
+    let python = resolve_python_interpreter(root)?;
+    eprintln!(
+        "Research Workspace launcher using Python: {}",
+        python.display()
+    );
 
     let mut child = Command::new(&python)
         .current_dir(root)
@@ -153,7 +190,8 @@ fn spawn_server(root: &PathBuf, data: &PathBuf, port: u16) -> Result<Child, Stri
         .spawn()
         .map_err(|e| {
             format!(
-                "Could not start `{python}`.\nInstall Python 3 and:\n  python3 -m pip install -r requirements.txt\n\nDetails: {e}"
+                "Could not start `{}`.\nInstall dependencies in the project .venv and try again.\n\nDetails: {e}",
+                python.display()
             )
         })?;
 
