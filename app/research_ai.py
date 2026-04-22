@@ -677,6 +677,8 @@ def build_resource_deep_dive(
         "Create a serious deep dive for a single research resource.\n"
         "Ground claims in the provided title/summary/notes/questions/evidence pack.\n"
         "Avoid generic prose.\n"
+        "Do not output instructions to the reader. Output concrete synthesis statements only.\n"
+        "Ignore publisher/legal/copyright boilerplate and prioritize conceptual content.\n"
         "Return JSON with keys only:\n"
         "{"
         '"evidence_notes":["short quote or phrase from source + why it matters"],'
@@ -757,21 +759,38 @@ def _offline_resource_deep_dive(
     source_digest: str,
 ) -> dict[str, Any]:
     title = resource.get("title") or "Untitled resource"
-    summary = (resource.get("summary") or "").strip()
-    notes = (resource.get("notes") or "").strip()
-    overview = f"{title} sits inside '{subtopic.get('name') or 'this subtopic'}' and should be read as a standalone argument."
-    if summary:
-        overview += f" Summary signal: {summary[:320]}"
-    evidence_notes = _extract_signal_sentences(evidence_pack, max_items=4)
+    summary = _normalize_for_prompt((resource.get("summary") or "").strip())
+    notes = _normalize_for_prompt((resource.get("notes") or "").strip())
+    evidence_notes = _extract_signal_sentences(evidence_pack, max_items=6)
+    strongest = evidence_notes[:3] if evidence_notes else _extract_signal_sentences(summary, max_items=3)
+    if not strongest:
+        strongest = ["The source appears partially extracted; core argumentative lines are limited."]
+
+    overview_parts = [f"{title} advances a focused argument rather than a broad survey."]
+    if strongest:
+        overview_parts.append(f"Its central line is: {strongest[0]}")
+    if len(strongest) > 1:
+        overview_parts.append(f"A supporting strand is: {strongest[1]}")
+    if summary and len(summary) > 40:
+        snippet = summary[:260]
+        if snippet not in " ".join(overview_parts):
+            overview_parts.append(snippet)
+    overview = " ".join(overview_parts)
+
+    assumptions = _derive_assumptions(strongest, notes, evidence_notes)
+    tensions = _derive_tensions(strongest, evidence_notes)
+    writing_angles = _derive_writing_angles(strongest, tensions)
+    next_q = _derive_next_questions(strongest, tensions, question_lines)
+    key_concepts = _extract_key_concepts(evidence_pack)
     return {
-        "evidence_notes": evidence_notes,
+        "evidence_notes": evidence_notes[:4],
         "resource_overview": overview,
-        "strongest_ideas": [summary[:220]] if summary else ["Extract the strongest thesis this source defends."],
-        "assumptions": [notes[:220]] if notes else ["Identify hidden assumptions and boundary conditions."],
-        "tensions_and_angles": ["Compare this source's stance against at least one contrasting resource."],
-        "key_concepts": [],
-        "writing_angles": ["Write a brief for and against the main claim in this resource."],
-        "next_questions": question_lines[:5] or ["What evidence would most strengthen or weaken this resource?"],
+        "strongest_ideas": strongest,
+        "assumptions": assumptions,
+        "tensions_and_angles": tensions,
+        "key_concepts": key_concepts,
+        "writing_angles": writing_angles,
+        "next_questions": next_q,
         "source_digest": source_digest,
     }
 
@@ -801,9 +820,20 @@ def _build_evidence_pack(text: str, max_chars: int = 9000) -> str:
 
 def _normalize_for_prompt(text: str) -> str:
     lines = []
+    seen: dict[str, int] = {}
+    raw_lines = []
     for ln in (text or "").splitlines():
         s = " ".join(ln.strip().split())
         if len(s) < 2:
+            continue
+        if _is_boilerplate_line(s):
+            continue
+        raw_lines.append(s)
+        seen[s] = seen.get(s, 0) + 1
+    repeat_threshold = max(3, int(len(raw_lines) * 0.12)) if raw_lines else 999999
+    for s in raw_lines:
+        # prune repeated running headers/footers
+        if seen.get(s, 0) >= repeat_threshold and len(s) < 120:
             continue
         lines.append(s)
     return "\n".join(lines).strip()
@@ -815,6 +845,8 @@ def _extract_signal_sentences(text: str, max_items: int = 4) -> list[str]:
     for part in raw.split("."):
         s = part.strip()
         if len(s) < 45:
+            continue
+        if _is_boilerplate_line(s):
             continue
         # Favor sentences with specific markers of claims/method/findings.
         score = 0
@@ -830,3 +862,97 @@ def _extract_signal_sentences(text: str, max_items: int = 4) -> list[str]:
         if len(out) >= max_items:
             break
     return out
+
+
+def _is_boilerplate_line(line: str) -> bool:
+    low = line.lower()
+    boiler = (
+        "springer nature",
+        "terms of use",
+        "license",
+        "all rights reserved",
+        "copyright",
+        "reprints and permissions",
+        "publisher",
+        "author accepted manuscript",
+        "supplementary information",
+        "doi:",
+        "www.",
+        "http://",
+        "https://",
+    )
+    if any(x in low for x in boiler):
+        return True
+    if len(line) > 20 and sum(ch.isalpha() for ch in line) < 8:
+        return True
+    return False
+
+
+def _derive_assumptions(strongest: list[str], notes: str, evidence: list[str]) -> list[str]:
+    base = strongest + evidence
+    out = []
+    for s in base[:4]:
+        if "because" in s.lower():
+            out.append(f"The argument depends on the causal link implied in: {s[:170]}")
+        elif "should" in s.lower() or "must" in s.lower():
+            out.append(f"The source assumes a normative priority behind: {s[:170]}")
+        else:
+            out.append(f"The source assumes this claim generalizes beyond the immediate examples: {s[:170]}")
+    if notes:
+        out.append(f"Author notes also imply this framing assumption: {notes[:170]}")
+    return out[:4] or ["The source assumes its benchmark or case framing is representative of the broader problem."]
+
+
+def _derive_tensions(strongest: list[str], evidence: list[str]) -> list[str]:
+    out = []
+    pool = strongest + evidence
+    if len(pool) >= 2:
+        out.append(f"A central tension is between these two moves: {pool[0][:100]} ... versus {pool[1][:100]}")
+    for s in pool[:4]:
+        low = s.lower()
+        if "however" in low or "but" in low:
+            out.append(f"The source flags an internal trade-off: {s[:180]}")
+        if "failed" in low or "risk" in low:
+            out.append(f"It acknowledges a vulnerability that complicates its main position: {s[:180]}")
+    return out[:4] or ["The source advances a strong claim but leaves limits under-specified."]
+
+
+def _derive_writing_angles(strongest: list[str], tensions: list[str]) -> list[str]:
+    out = []
+    if strongest:
+        out.append(
+            f"A strong writing angle is to test whether this claim survives outside the source's chosen frame: {strongest[0][:150]}"
+        )
+    if tensions:
+        out.append(f"Another writing angle is to center critique on this tension: {tensions[0][:170]}")
+    if len(strongest) > 1:
+        out.append(f"The piece can contrast the main claim with this qualifying line: {strongest[1][:170]}")
+    return out[:4] or ["The clearest writing path is to stress-test the source's strongest claim against an alternative mechanism."]
+
+
+def _derive_next_questions(strongest: list[str], tensions: list[str], existing: list[str]) -> list[str]:
+    out = []
+    if strongest:
+        out.append(f"What evidence would most directly falsify this line: {strongest[0][:140]}?")
+    if tensions:
+        out.append(f"Which side of this tension is better supported in the source's own evidence: {tensions[0][:140]}?")
+    out.extend(existing[:2])
+    return out[:5] or ["What specific part of the source's argument would break first under a changed context?"]
+
+
+def _extract_key_concepts(text: str) -> list[str]:
+    concepts = []
+    for s in _extract_signal_sentences(text, max_items=8):
+        words = [w.strip(" ,;:()[]").lower() for w in s.split()]
+        for i, w in enumerate(words):
+            if len(w) < 6 or not w.isalpha():
+                continue
+            if w in {"because", "therefore", "however", "between", "through", "within"}:
+                continue
+            phrase = w
+            if i + 1 < len(words) and words[i + 1].isalpha() and len(words[i + 1]) > 4:
+                phrase = f"{w} {words[i + 1]}"
+            concepts.append(f"{phrase}: operative concept in the source's argument")
+            if len(concepts) >= 5:
+                return concepts
+    return concepts
