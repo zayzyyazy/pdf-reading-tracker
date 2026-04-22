@@ -126,12 +126,23 @@ def init_db() -> None:
                 FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE SET NULL
             );
 
+            CREATE TABLE IF NOT EXISTS deep_dives (
+                id TEXT PRIMARY KEY,
+                subtopic_id TEXT NOT NULL UNIQUE,
+                payload_json TEXT NOT NULL,
+                source_digest TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (subtopic_id) REFERENCES subtopics(id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_subtopics_category ON subtopics(category_id);
             CREATE INDEX IF NOT EXISTS idx_subtopics_parent ON subtopics(parent_id);
             CREATE INDEX IF NOT EXISTS idx_resources_subtopic ON resources(subtopic_id);
             CREATE INDEX IF NOT EXISTS idx_questions_subtopic ON questions(subtopic_id);
             CREATE INDEX IF NOT EXISTS idx_questions_resource ON questions(resource_id);
             CREATE INDEX IF NOT EXISTS idx_writings_subtopic ON writings(subtopic_id);
+            CREATE INDEX IF NOT EXISTS idx_deep_dives_subtopic ON deep_dives(subtopic_id);
             """
         )
         _ensure_writings_refined_column(conn)
@@ -753,3 +764,50 @@ def subtopic_breadcrumb(sid: str) -> list[dict[str, Any]]:
 def delete_resource(rid: str) -> None:
     with connect() as conn:
         conn.execute("DELETE FROM resources WHERE id = ?", (rid,))
+
+
+# --- Deep dives ---
+
+
+def get_deep_dive_for_subtopic(subtopic_id: str) -> Optional[dict[str, Any]]:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM deep_dives WHERE subtopic_id = ?",
+            (subtopic_id,),
+        ).fetchone()
+        if not row:
+            return None
+        out = row_to_dict(row)
+        try:
+            out["payload"] = json.loads(out.get("payload_json") or "{}")
+        except json.JSONDecodeError:
+            out["payload"] = {}
+        return out
+
+
+def upsert_deep_dive_for_subtopic(subtopic_id: str, payload: dict[str, Any], source_digest: str = "") -> str:
+    did = _uid()
+    ts = _now()
+    payload_json = json.dumps(payload, ensure_ascii=True)
+    with connect() as conn:
+        existing = conn.execute(
+            "SELECT id, created_at FROM deep_dives WHERE subtopic_id = ?",
+            (subtopic_id,),
+        ).fetchone()
+        if existing:
+            did = existing["id"]
+            created = existing["created_at"]
+            conn.execute(
+                """UPDATE deep_dives
+                SET payload_json = ?, source_digest = ?, updated_at = ?
+                WHERE id = ?""",
+                (payload_json, source_digest or None, ts, did),
+            )
+            return did
+        conn.execute(
+            """INSERT INTO deep_dives
+            (id, subtopic_id, payload_json, source_digest, created_at, updated_at)
+            VALUES (?,?,?,?,?,?)""",
+            (did, subtopic_id, payload_json, source_digest or None, ts, ts),
+        )
+    return did

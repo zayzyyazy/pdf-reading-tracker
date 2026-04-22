@@ -348,3 +348,40 @@ button.danger {
   padding: 0.75rem;
   margin-top: 0.35rem;
 }
+
+.deep-dive-card {
+  background: linear-gradient(180deg, #ffffff 0%, #fcfbf8 100%);
+}
+
+.deep-dive-head {
+  align-items: center;
+}
+
+.deep-dive-sections {
+  margin-top: 1rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.deep-dive-sections section {
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.deep-dive-sections h3 {
+  margin: 0 0 0.4rem;
+  font-family: var(--sans);
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.deep-dive-sections p {
+  margin: 0;
+  color: var(--text);
+  line-height: 1.62;
+}
+
+.list.compact li {
+  padding: 0.4rem 0;
+}

@@ -290,6 +290,9 @@ def subtopic_detail(request: Request, sid: str):
     resources = db.list_resources_for_subtopic(sid)
     questions = db.list_questions_for_subtopic(sid)
     writings = db.list_writings_for_subtopic(sid)
+    deep_dive = db.get_deep_dive_for_subtopic(sid)
+    current_digest = research_ai.deep_dive_source_digest(st, resources, questions)
+    deep_dive_stale = bool(deep_dive and deep_dive.get("source_digest") != current_digest)
     return templates.TemplateResponse(
         request,
         "subtopic.html",
@@ -303,6 +306,8 @@ def subtopic_detail(request: Request, sid: str):
             "resources": resources,
             "questions": questions,
             "writings": writings,
+            "deep_dive": deep_dive,
+            "deep_dive_stale": deep_dive_stale,
         },
     )
 
@@ -321,6 +326,18 @@ def subtopic_create_child(
         raise HTTPException(400, "Name required")
     nid = db.create_subtopic(parent["category_id"], name, sid, research_field, topic_summary)
     return RedirectResponse(url=f"/subtopics/{nid}", status_code=303)
+
+
+@app.post("/subtopics/{sid}/deep-dive/generate")
+def subtopic_generate_deep_dive(sid: str):
+    st = db.get_subtopic(sid)
+    if not st:
+        raise HTTPException(404, "Subtopic not found")
+    resources = db.list_resources_for_subtopic(sid)
+    questions = db.list_questions_for_subtopic(sid)
+    payload = research_ai.build_deep_dive(st, resources, questions)
+    db.upsert_deep_dive_for_subtopic(sid, payload, source_digest=payload.get("source_digest", ""))
+    return RedirectResponse(url=f"/subtopics/{sid}", status_code=303)
 
 
 @app.get("/resources/new")

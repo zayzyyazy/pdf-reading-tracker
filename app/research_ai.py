@@ -4,6 +4,7 @@ Falls back to simple heuristics when no API key is configured or the API is unav
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Optional
 
@@ -240,3 +241,203 @@ def infer_source_type(filename: str) -> str:
         "md": "notes",
     }
     return mapping.get(ext, "other")
+
+
+def build_deep_dive(
+    subtopic: dict[str, Any],
+    resources: list[dict[str, Any]],
+    questions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """
+    Build a structured deep dive grounded in one subtopic's local materials.
+    Returns a payload with sections and a source digest.
+    """
+    resource_lines, question_lines, source_blob, source_digest = _deep_dive_source_snapshot(
+        subtopic, resources, questions
+    )
+
+    client = _client()
+    if not client:
+        return _offline_deep_dive(subtopic, resource_lines, question_lines, source_digest)
+
+    prompt = (
+        "You are synthesizing a serious research topic deep dive for one subtopic.\n"
+        "Ground every claim in the provided resources/questions.\n"
+        "Avoid generic filler and avoid corporate prose.\n"
+        "Return strict JSON with these keys only:\n"
+        "{\n"
+        '  "overview": "4-7 sentences",\n'
+        '  "key_themes": ["..."],\n'
+        '  "resource_connections": ["..."],\n'
+        '  "tensions_and_gaps": ["..."],\n'
+        '  "important_vocabulary": ["term: why it matters"],\n'
+        '  "field_framing": "1-3 sentences",\n'
+        '  "writing_angles": ["..."],\n'
+        '  "next_questions": ["..."]\n'
+        "}\n\n"
+        "Rules:\n"
+        "- Be specific to this subtopic.\n"
+        "- Mention concrete resource titles where useful.\n"
+        "- Keep each bullet concise and intellectually meaningful.\n"
+        "- If evidence is thin, state uncertainty directly.\n\n"
+        f"Subtopic name: {subtopic.get('name') or ''}\n"
+        f"Research field: {subtopic.get('research_field') or ''}\n"
+        f"Topic summary: {subtopic.get('topic_summary') or ''}\n\n"
+        f"Resources and questions (JSON):\n{source_blob[:14000]}"
+    )
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content or "{}"
+        data = json.loads(raw)
+        return _normalize_deep_dive_payload(data, source_digest)
+    except (json.JSONDecodeError, Exception):
+        return _offline_deep_dive(subtopic, resource_lines, question_lines, source_digest)
+
+
+def deep_dive_source_digest(
+    subtopic: dict[str, Any],
+    resources: list[dict[str, Any]],
+    questions: list[dict[str, Any]],
+) -> str:
+    _, _, _, source_digest = _deep_dive_source_snapshot(subtopic, resources, questions)
+    return source_digest
+
+
+def _deep_dive_source_snapshot(
+    subtopic: dict[str, Any],
+    resources: list[dict[str, Any]],
+    questions: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str, str]:
+    resource_lines = []
+    for r in resources:
+        title = (r.get("title") or "Untitled resource").strip()
+        summary = (r.get("summary") or "").strip()
+        notes = (r.get("notes") or "").strip()
+        source_type = (r.get("source_type") or "other").strip()
+        resource_lines.append(
+            {
+                "id": r.get("id"),
+                "title": title,
+                "source_type": source_type,
+                "summary": summary,
+                "notes": notes,
+            }
+        )
+
+    question_lines = []
+    for q in questions:
+        body = (q.get("body") or "").strip()
+        if body:
+            question_lines.append({"id": q.get("id"), "body": body, "explored": bool(q.get("explored"))})
+
+    source_blob = json.dumps(
+        {
+            "subtopic": {
+                "id": subtopic.get("id"),
+                "name": subtopic.get("name"),
+                "research_field": subtopic.get("research_field"),
+                "topic_summary": subtopic.get("topic_summary"),
+            },
+            "resources": resource_lines,
+            "questions": question_lines,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+    )
+    source_digest = hashlib.sha256(source_blob.encode("utf-8")).hexdigest()
+    return resource_lines, question_lines, source_blob, source_digest
+
+
+def _normalize_deep_dive_payload(data: dict[str, Any], source_digest: str) -> dict[str, Any]:
+    def _to_list(v: Any, fallback: list[str]) -> list[str]:
+        if not isinstance(v, list):
+            return fallback
+        out = [str(x).strip() for x in v if str(x).strip()]
+        return out if out else fallback
+
+    overview = str(data.get("overview") or "").strip() or "No overview available yet."
+    field_framing = str(data.get("field_framing") or "").strip() or "Field framing is still emerging in this subtopic."
+    payload = {
+        "overview": overview,
+        "key_themes": _to_list(data.get("key_themes"), ["Theme extraction needs more source detail."]),
+        "resource_connections": _to_list(data.get("resource_connections"), ["Connections between resources remain under-specified."]),
+        "tensions_and_gaps": _to_list(data.get("tensions_and_gaps"), ["Current materials leave major open tensions."]),
+        "important_vocabulary": _to_list(data.get("important_vocabulary"), []),
+        "field_framing": field_framing,
+        "writing_angles": _to_list(data.get("writing_angles"), ["Compare competing interpretations from the current sources."]),
+        "next_questions": _to_list(data.get("next_questions"), ["What evidence would most change your current view of this topic?"]),
+        "source_digest": source_digest,
+    }
+    return payload
+
+
+def _offline_deep_dive(
+    subtopic: dict[str, Any],
+    resources: list[dict[str, Any]],
+    questions: list[dict[str, Any]],
+    source_digest: str,
+) -> dict[str, Any]:
+    titles = [r["title"] for r in resources if r.get("title")]
+    resource_count = len(resources)
+    question_count = len(questions)
+    top_summaries = [r.get("summary", "") for r in resources if r.get("summary")]
+    overview_bits = []
+    if subtopic.get("topic_summary"):
+        overview_bits.append(str(subtopic.get("topic_summary")).strip())
+    if titles:
+        overview_bits.append(
+            f"This subtopic currently draws on {resource_count} resources, including {', '.join(titles[:3])}."
+        )
+    else:
+        overview_bits.append("This subtopic has no attached resources yet, so synthesis quality is currently limited.")
+    if question_count:
+        overview_bits.append(f"It also includes {question_count} research questions that indicate open inquiry paths.")
+    overview = " ".join([x for x in overview_bits if x]).strip()
+
+    key_themes = []
+    for s in top_summaries[:3]:
+        text = s.replace("\n", " ").strip()
+        if text:
+            key_themes.append(text[:220])
+    if not key_themes:
+        key_themes = ["Collect at least two substantive resource summaries to extract stronger themes."]
+
+    connections = []
+    if len(titles) >= 2:
+        connections.append(f"Read {titles[0]} and {titles[1]} in dialogue: where they reinforce each other versus diverge.")
+    if question_count and titles:
+        connections.append("Use the existing subtopic questions as an indexing layer across the current resources.")
+    if not connections:
+        connections = ["Connection mapping is limited until more resources or questions are added."]
+
+    tension = ["Evidence base is currently thin; treat conclusions as provisional."]
+    if questions:
+        tension.append("Several open questions are still unresolved and should drive the next round of reading.")
+
+    vocab = []
+    if subtopic.get("research_field"):
+        vocab.append(f"{subtopic.get('research_field')}: likely disciplinary lens guiding interpretation.")
+
+    writing_angles = [
+        "Argue for which question in this subtopic is most decision-relevant and why.",
+        "Write a position piece comparing the strongest and weakest assumptions across the resources.",
+    ]
+    next_questions = [q["body"] for q in questions[:5]] or [
+        "What is the most important missing resource type in this subtopic (empirical, theoretical, or critique)?"
+    ]
+
+    return {
+        "overview": overview or "No overview available yet.",
+        "key_themes": key_themes,
+        "resource_connections": connections,
+        "tensions_and_gaps": tension,
+        "important_vocabulary": vocab,
+        "field_framing": "This deep dive is generated in local-first fallback mode; refine after adding richer source summaries.",
+        "writing_angles": writing_angles,
+        "next_questions": next_questions,
+        "source_digest": source_digest,
+    }
