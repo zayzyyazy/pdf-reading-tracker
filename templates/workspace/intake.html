@@ -59,8 +59,12 @@
     var fd = new FormData();
     if (sub && sub.value) fd.append("subtopic_id", sub.value);
     for (var i = 0; i < fileList.length; i++) fd.append("files", fileList[i]);
-    fetch(form.action, { method: "POST", body: fd, redirect: "manual" })
+    fetch(form.action, { method: "POST", body: fd })
       .then(function (r) {
+        if (r.redirected && r.url) {
+          window.location = r.url;
+          return;
+        }
         if (r.status >= 300 && r.status < 400) {
           var loc = r.headers.get("Location");
           if (loc) {
@@ -93,6 +97,16 @@
   });
   drop.addEventListener("drop", function (e) {
     var files = e.dataTransfer && e.dataTransfer.files;
+    if ((!files || !files.length) && e.dataTransfer && e.dataTransfer.items) {
+      files = [];
+      for (var i = 0; i < e.dataTransfer.items.length; i++) {
+        var it = e.dataTransfer.items[i];
+        if (it.kind === "file") {
+          var f = it.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+    }
     if (!files || !files.length) return;
     postFiles(files);
   });

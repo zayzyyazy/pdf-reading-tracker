@@ -25,17 +25,23 @@ def _offline_summary(snippet: str) -> dict[str, str]:
     lines = [ln.strip() for ln in snippet.splitlines() if ln.strip()]
     if lines:
         title = lines[0][:120]
-    summary = (snippet[:500] + "…") if len(snippet) > 500 else snippet
+    points = _extract_signal_sentences(snippet, max_items=4)
+    if points:
+        summary = " ".join(points[:3])
+    else:
+        summary = (snippet[:500] + "…") if len(snippet) > 500 else snippet
     return {"title": title, "summary": summary.strip() or "No text extracted."}
 
 
-def _fallback_questions(title: str) -> list[str]:
+def _fallback_questions(title: str, evidence_pack: str = "") -> list[str]:
     t = title or "this material"
+    sig = _extract_signal_sentences(evidence_pack, max_items=2)
+    anchor = sig[0] if sig else ""
     return [
-        f"What is the core claim in “{t[:80]}”, and what would falsify it?",
-        "Which assumptions are implicit but load-bearing?",
-        "How does this connect to work I already trust or distrust?",
-        "What is the smallest experiment or reading that would change my mind?",
+        f"What is the core claim in “{t[:80]}”, and what evidence in the source best supports it?",
+        "Which assumptions are implicit but load-bearing, and where are they visible in the text?",
+        f"If the source says '{anchor[:90]}' what tension or counterexample should be tested?" if anchor else "Which argument step is least justified by the source's own evidence?",
+        "What is the smallest follow-up reading or test that could materially change your view of this source?",
     ]
 
 
@@ -89,15 +95,20 @@ def _label_from_snippet(snippet: str, fallback: str = "New inquiry") -> str:
 
 def summarize_for_resource(text: str, max_chars: int = 4000) -> dict[str, str]:
     """Return title + summary from raw extracted text."""
-    snippet = (text or "")[:max_chars]
+    snippet = _build_evidence_pack(text or "", max_chars=max_chars)
     client = _client()
     if not client:
         return _offline_summary(snippet)
 
     prompt = (
-        "Read the following document excerpt. Return JSON only with keys:\n"
-        '- title: concise title\n'
-        '- summary: 2-4 sentences in the reader\'s voice, not marketing copy\n'
+        "Read this evidence pack extracted from one source.\n"
+        "Infer what the source is specifically about based on quoted content.\n"
+        "Return JSON only with keys:\n"
+        '- title: concise source title (6-14 words, source-specific)\n'
+        '- summary: 4-7 sentences grounded in the evidence. Mention at least two concrete claims/ideas from the text.\n'
+        "Rules:\n"
+        "- Do not write generic academic filler.\n"
+        "- If the text is partial/noisy, state uncertainty briefly instead of guessing.\n"
         f"\n---\n{snippet}\n---\n"
     )
     try:
@@ -124,21 +135,23 @@ def generate_questions(
     """Produce a short list of substantive follow-up questions."""
     title = title or "Untitled"
     summary = summary or ""
-    ctx = (extra_context or "")[:2500]
+    ctx = _build_evidence_pack(extra_context or "", max_chars=9000)
     client = _client()
     if not client:
-        return _fallback_questions(title)
+        return _fallback_questions(title, ctx)
 
     prompt = (
         "You help a careful reader think deeper.\n"
-        "Given a source title, summary, and optional excerpt, propose 4-6 concrete questions.\n"
+        "Given a source title, summary, and evidence pack from the source, propose 5-8 concrete questions.\n"
         "Rules:\n"
         "- Short lines, no numbering prefix in the string (the app will number them).\n"
-        "- No generic study questions; tie to this specific content when possible.\n"
+        "- No generic study questions; tie each question to specific claims/terms from this source.\n"
+        "- At least 2 questions should probe assumptions or methodological tension.\n"
+        "- At least 2 questions should be useful as writing/opinion entry points.\n"
         "- Return JSON only: {\"questions\": [\"...\", \"...\"]}\n\n"
         f"title: {title}\n"
         f"summary: {summary}\n"
-        f"excerpt:\n{ctx}\n"
+        f"evidence_pack:\n{ctx}\n"
     )
     try:
         resp = client.chat.completions.create(
@@ -154,7 +167,7 @@ def generate_questions(
             return out[:8]
     except (json.JSONDecodeError, Exception):
         pass
-    return _fallback_questions(title)
+    return _fallback_questions(title, ctx)
 
 
 def refine_writing(
@@ -303,7 +316,7 @@ def decide_resource_placement(
             "topic_summary": "",
             "reason": "No existing structure available.",
         }
-    snippet = (text_snippet or "")[:3800]
+    snippet = _build_evidence_pack(text_snippet or "", max_chars=10000)
     client = _client()
     cats = [{"id": c.get("id"), "name": c.get("name"), "description": c.get("description") or ""} for c in categories]
     subs = []
@@ -341,7 +354,7 @@ def decide_resource_placement(
         '"reason":"one short sentence"'
         "}\n\n"
         f"filename: {filename}\n"
-        f"text excerpt:\n{snippet}\n\n"
+        f"text evidence pack:\n{snippet}\n\n"
         f"Categories JSON:\n{json.dumps(cats, ensure_ascii=True)}\n\n"
         f"Subtopics JSON:\n{json.dumps(subs, ensure_ascii=True)}\n"
     )
@@ -489,7 +502,7 @@ def build_deep_dive(
         f"Subtopic name: {subtopic.get('name') or ''}\n"
         f"Research field: {subtopic.get('research_field') or ''}\n"
         f"Topic summary: {subtopic.get('topic_summary') or ''}\n\n"
-        f"Resources and questions (JSON):\n{source_blob[:14000]}"
+        f"Resources and questions (JSON):\n{source_blob[:22000]}"
     )
     try:
         resp = client.chat.completions.create(
@@ -605,10 +618,9 @@ def _offline_deep_dive(
     overview = " ".join([x for x in overview_bits if x]).strip()
 
     key_themes = []
-    for s in top_summaries[:3]:
-        text = s.replace("\n", " ").strip()
-        if text:
-            key_themes.append(text[:220])
+    for s in top_summaries[:5]:
+        key_themes.extend(_extract_signal_sentences(s, max_items=2))
+    key_themes = [k[:220] for k in key_themes if k][:5]
     if not key_themes:
         key_themes = ["Collect at least two substantive resource summaries to extract stronger themes."]
 
@@ -657,15 +669,17 @@ def build_resource_deep_dive(
 ) -> dict[str, Any]:
     source_digest = resource_deep_dive_source_digest(resource, questions)
     question_lines = [str(q.get("body") or "").strip() for q in questions if str(q.get("body") or "").strip()]
+    evidence_pack = _build_evidence_pack(excerpt or "", max_chars=12000)
     client = _client()
     if not client:
-        return _offline_resource_deep_dive(resource, subtopic, question_lines, source_digest)
+        return _offline_resource_deep_dive(resource, subtopic, question_lines, evidence_pack, source_digest)
     prompt = (
         "Create a serious deep dive for a single research resource.\n"
-        "Ground claims in the provided title/summary/notes/questions/excerpt.\n"
+        "Ground claims in the provided title/summary/notes/questions/evidence pack.\n"
         "Avoid generic prose.\n"
         "Return JSON with keys only:\n"
         "{"
+        '"evidence_notes":["short quote or phrase from source + why it matters"],'
         '"resource_overview":"3-6 sentences",'
         '"strongest_ideas":["..."],'
         '"assumptions":["..."],'
@@ -680,7 +694,7 @@ def build_resource_deep_dive(
         f"summary: {resource.get('summary') or ''}\n"
         f"notes: {resource.get('notes') or ''}\n"
         f"questions: {json.dumps(question_lines[:12], ensure_ascii=True)}\n"
-        f"excerpt: {(excerpt or '')[:5000]}\n"
+        f"evidence_pack:\n{evidence_pack}\n"
     )
     try:
         resp = client.chat.completions.create(
@@ -691,6 +705,7 @@ def build_resource_deep_dive(
         raw = resp.choices[0].message.content or "{}"
         data = json.loads(raw)
         return {
+            "evidence_notes": _as_clean_list(data.get("evidence_notes"), []),
             "resource_overview": _clean_label(str(data.get("resource_overview") or ""), "No overview available yet.", 900),
             "strongest_ideas": _as_clean_list(data.get("strongest_ideas"), ["Identify the central claim and strongest support."]),
             "assumptions": _as_clean_list(data.get("assumptions"), ["What assumptions does this resource rely on?"]),
@@ -701,7 +716,7 @@ def build_resource_deep_dive(
             "source_digest": source_digest,
         }
     except (json.JSONDecodeError, Exception):
-        return _offline_resource_deep_dive(resource, subtopic, question_lines, source_digest)
+        return _offline_resource_deep_dive(resource, subtopic, question_lines, evidence_pack, source_digest)
 
 
 def _as_clean_list(value: Any, fallback: list[str]) -> list[str]:
@@ -738,6 +753,7 @@ def _offline_resource_deep_dive(
     resource: dict[str, Any],
     subtopic: dict[str, Any],
     question_lines: list[str],
+    evidence_pack: str,
     source_digest: str,
 ) -> dict[str, Any]:
     title = resource.get("title") or "Untitled resource"
@@ -746,7 +762,9 @@ def _offline_resource_deep_dive(
     overview = f"{title} sits inside '{subtopic.get('name') or 'this subtopic'}' and should be read as a standalone argument."
     if summary:
         overview += f" Summary signal: {summary[:320]}"
+    evidence_notes = _extract_signal_sentences(evidence_pack, max_items=4)
     return {
+        "evidence_notes": evidence_notes,
         "resource_overview": overview,
         "strongest_ideas": [summary[:220]] if summary else ["Extract the strongest thesis this source defends."],
         "assumptions": [notes[:220]] if notes else ["Identify hidden assumptions and boundary conditions."],
@@ -756,3 +774,59 @@ def _offline_resource_deep_dive(
         "next_questions": question_lines[:5] or ["What evidence would most strengthen or weaken this resource?"],
         "source_digest": source_digest,
     }
+
+
+def _build_evidence_pack(text: str, max_chars: int = 9000) -> str:
+    cleaned = _normalize_for_prompt(text)
+    if not cleaned:
+        return ""
+    n = len(cleaned)
+    if n <= max_chars:
+        return cleaned
+    # Cover intro, middle, and late sections to reduce first-page bias.
+    one = max_chars // 3
+    windows = [
+        cleaned[:one],
+        cleaned[max(0, n // 2 - one // 2) : min(n, n // 2 + one // 2)],
+        cleaned[max(0, n - one) :],
+    ]
+    parts = []
+    labels = ["[early]", "[middle]", "[late]"]
+    for i, w in enumerate(windows):
+        chunk = w.strip()
+        if chunk:
+            parts.append(f"{labels[i]}\n{chunk}")
+    return "\n\n".join(parts)[:max_chars]
+
+
+def _normalize_for_prompt(text: str) -> str:
+    lines = []
+    for ln in (text or "").splitlines():
+        s = " ".join(ln.strip().split())
+        if len(s) < 2:
+            continue
+        lines.append(s)
+    return "\n".join(lines).strip()
+
+
+def _extract_signal_sentences(text: str, max_items: int = 4) -> list[str]:
+    sents = []
+    raw = _normalize_for_prompt(text).replace("?", ".").replace("!", ".")
+    for part in raw.split("."):
+        s = part.strip()
+        if len(s) < 45:
+            continue
+        # Favor sentences with specific markers of claims/method/findings.
+        score = 0
+        low = s.lower()
+        for marker in ("argue", "claim", "find", "result", "because", "therefore", "however", "method", "evidence"):
+            if marker in low:
+                score += 1
+        sents.append((score, s))
+    sents.sort(key=lambda x: (-x[0], -len(x[1])))
+    out = []
+    for _, sent in sents:
+        out.append(sent[:220])
+        if len(out) >= max_items:
+            break
+    return out

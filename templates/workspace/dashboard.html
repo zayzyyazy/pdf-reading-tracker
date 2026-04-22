@@ -35,8 +35,12 @@
     var fd = new FormData();
     if (sub && sub.value) fd.append("subtopic_id", sub.value);
     for (var i = 0; i < files.length; i++) fd.append("files", files[i]);
-    fetch("/intake", { method: "POST", body: fd, redirect: "manual" })
+    fetch("/intake", { method: "POST", body: fd })
       .then(function (r) {
+        if (r.redirected && r.url) {
+          window.location = r.url;
+          return;
+        }
         if (r.status >= 300 && r.status < 400) {
           var loc = r.headers.get("Location");
           if (loc) { window.location = loc; return; }
@@ -59,6 +63,16 @@
   });
   drop.addEventListener("drop", function (e) {
     var f = e.dataTransfer && e.dataTransfer.files;
+    if ((!f || !f.length) && e.dataTransfer && e.dataTransfer.items) {
+      f = [];
+      for (var i = 0; i < e.dataTransfer.items.length; i++) {
+        var it = e.dataTransfer.items[i];
+        if (it.kind === "file") {
+          var ff = it.getAsFile();
+          if (ff) f.push(ff);
+        }
+      }
+    }
     if (f && f.length) postFiles(f);
   });
 })();

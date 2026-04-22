@@ -58,6 +58,14 @@
       {% if resource_deep_dive and resource_deep_dive.payload %}
       {% set rdd = resource_deep_dive.payload %}
       <div class="deep-dive-sections">
+        {% if rdd.evidence_notes %}
+        <section>
+          <h3>Source evidence notes</h3>
+          <ul class="list compact">
+            {% for item in rdd.evidence_notes %}<li>{{ item }}</li>{% endfor %}
+          </ul>
+        </section>
+        {% endif %}
         <section>
           <h3>Overview</h3>
           <p>{{ rdd.resource_overview }}</p>

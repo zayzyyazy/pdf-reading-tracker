@@ -102,7 +102,7 @@ def ingest_resource_bytes(
     db.set_resource_file_path(rid, os.path.relpath(dest, BASE_DIR))
     text = _extract_uploaded_text(dest)
     if text.strip():
-        meta = research_ai.summarize_for_resource(text)
+        meta = research_ai.summarize_for_resource(text, max_chars=12000)
         new_title = (title or "").strip() or meta.get("title") or initial_title
         new_summary = (summary or "").strip() or meta.get("summary") or ""
         db.update_resource(rid, title=new_title, summary=new_summary, source_type=stype)
@@ -505,7 +505,7 @@ def resource_generate_deep_dive(rid: str):
     if r.get("file_path"):
         fp = os.path.join(BASE_DIR, r["file_path"])
         if os.path.isfile(fp):
-            excerpt = _extract_uploaded_text(fp)[:5000]
+            excerpt = _extract_uploaded_text(fp)
     payload = research_ai.build_resource_deep_dive(r, st, qs, excerpt=excerpt)
     db.upsert_resource_deep_dive(rid, payload, source_digest=payload.get("source_digest", ""))
     return RedirectResponse(url=f"/resources/{rid}", status_code=303)
@@ -523,7 +523,7 @@ def resource_generate_questions(rid: str):
     if r.get("file_path"):
         fp = os.path.join(BASE_DIR, r["file_path"])
         if os.path.isfile(fp):
-            extra = _extract_uploaded_text(fp)[:4000]
+            extra = _extract_uploaded_text(fp)
     qs = research_ai.generate_questions(r.get("title") or "", r.get("summary") or "", extra)
     db.insert_questions_bulk(st["id"], rid, qs)
     return RedirectResponse(url=f"/resources/{rid}", status_code=303)
