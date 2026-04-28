@@ -3,6 +3,42 @@ import re
 from pypdf import PdfReader
 from docx import Document
 
+# Second half of a split token must not be merged into a common English word.
+_MERGE_BLOCK_SECOND = frozenset(
+    "the and for from with this that are was were can may not but has have "
+    "models work study paper data use time like line case cases into onto "
+    "will would could should their there these those when where which while "
+    "frontiers states years times works forms types sites areas levels "
+    "models users cases points lines means ways days".split()
+)
+_BAD_MERGE_FIRST = frozenset("new non pre pro anti sub mid the one two any all".split())
+
+
+def _repair_hyphen_space_artifacts(text: str) -> str:
+    """Fix 'AI- generated' / 'child -like' style hyphen+space PDF glitches."""
+    s = (text or "").replace("\ufb01", "fi").replace("\ufb02", "fl")
+    s = re.sub(r"-\s+([a-z])", r"-\1", s, flags=re.IGNORECASE)
+    return s
+
+
+def _repair_titlecase_word_splits(text: str) -> str:
+    """Join 'Bey ond' / 'Tog ether' style breaks: TitleCase-prefix + lowercase word."""
+
+    def repl(m: re.Match) -> str:
+        a, b = m.group(1), m.group(2)
+        if a.lower() in _BAD_MERGE_FIRST:
+            return m.group(0)
+        first_b = b.split()[0].lower() if b else ""
+        if first_b in _MERGE_BLOCK_SECOND:
+            return m.group(0)
+        if len(a) + len(b) > 22:
+            return m.group(0)
+        if a[0].isupper() and a[1:].islower() and b and b[0].islower():
+            return a + b
+        return m.group(0)
+
+    return re.sub(r"\b([A-Z][a-z]{1,3})\s([a-z]{3,})\b", repl, text)
+
 
 def _is_boilerplate_line(line: str) -> bool:
     low = line.lower()
@@ -25,6 +61,15 @@ def _is_boilerplate_line(line: str) -> bool:
         "small scale, personal",
         "re-use permitted",
         "competing interests",
+        "creative commons",
+        "licence for details",
+        "license for details",
+        "version of record",
+        "author manuscript",
+        "condition of access",
+        "permitted re-use",
+        "permitted reuse",
+        "personal use and",
     )
     if any(m in low for m in markers):
         return True
@@ -45,11 +90,13 @@ def _clean_extracted_text(raw: str) -> str:
             continue
         lines.append(s)
     merged = _recover_paragraphs(lines)
-    return "\n".join(merged).strip()
+    fixed = [_repair_hyphen_space_artifacts(_repair_titlecase_word_splits(p)) for p in merged]
+    return "\n".join(fixed).strip()
 
 
 def _normalize_line(line: str) -> str:
     s = (line or "").replace("\u00ad", "")
+    s = s.replace("\ufb01", "fi").replace("\ufb02", "fl")
     s = re.sub(r"\s+", " ", s).strip()
     s = re.sub(
         r"([a-z\)])\s+(The findings|These findings|This study|The study|Results|Discussion|Conclusion)\b",

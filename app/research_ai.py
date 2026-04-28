@@ -11,6 +11,7 @@ from collections import Counter
 from typing import Any, Optional
 
 import app.settings_store as settings_store
+from app.pdf_reader import _repair_hyphen_space_artifacts, _repair_titlecase_word_splits
 
 
 def _client():
@@ -39,15 +40,84 @@ def _dedupe_text_chunks(chunks: list[str], max_items: int = 4) -> list[str]:
     return out
 
 
+def _is_publisher_licence_or_notice(line: str) -> bool:
+    """Green OA / repository / publisher strips that are not article substance."""
+    low = (line or "").lower()
+    needles = (
+        "creative commons",
+        "creative commons licence",
+        "creative commons license",
+        "cc-by",
+        "cc by-nc",
+        "cc by",
+        "version of record",
+        "author manuscript",
+        "submitted for peer review",
+        "accepted for publication after peer review",
+        "re-use is limited",
+        "reuse is limited",
+        "licence for details of permitted",
+        "license for details of permitted",
+        "condition of access that users",
+        "please refer to the published source",
+        "document may not be the version of record",
+        "users recognise and abide by the legal requirements",
+        "permitted re-use",
+        "permitted reuse",
+    )
+    if any(n in low for n in needles):
+        return True
+    if "[article]" in low and ("licence" in low or "license" in low or "commons" in low):
+        return True
+    if "personal use" in low and ("licence" in low or "license" in low or "commons" in low):
+        return True
+    if "please note that this document" in low and "version" in low:
+        return True
+    return False
+
+
+def _strip_repository_banner_lines(s: str) -> str:
+    """Remove repository routing and licence tails; keep substantive body when mixed into one line."""
+    t = (s or "").strip()
+    if not t:
+        return ""
+    low = t.lower().replace("\u2019", "'").replace("\u2018", "'")
+    if "briefing papers" in low and ("qut" in low or "centre for justice" in low) and len(t) < 240:
+        return ""
+    if ("author's version" in low or "authors version" in low) and re.search(r"\(\d{4}\)", t):
+        m = re.search(r"\(\d{4}\)\s*(.+)$", t)
+        if m and len(m.group(1).strip()) > 45:
+            t = m.group(1).strip()
+            low = t.lower()
+    cut = None
+    for token in (
+        "[article]",
+        "creative commons licence",
+        "creative commons license",
+        "creative commons",
+        "author manuscript versions",
+        "version of record",
+        "notice: please note that this document",
+    ):
+        i = low.find(token)
+        if i != -1 and i >= 36:
+            cut = i if cut is None else min(cut, i)
+    if cut is not None:
+        t = t[:cut].strip(" ;—-\t")
+    return t
+
+
 def _offline_opening_summary(evidence_snippet: str, max_chars: int = 920) -> str:
     """Prefer the start of the contiguous evidence (usually abstract/intro) for local summaries."""
     parts: list[str] = []
     n = 0
     for p in (evidence_snippet or "").splitlines():
         s = re.sub(r"^(ORIGINAL ARTICLE|REVIEW ARTICLE|BRIEF COMMUNICATION)\s+", "", p.strip(), flags=re.I).strip()
+        s = re.sub(r"^(Editorial Introduction|Executive Summary|Research Summary)\s+", "", s, flags=re.I).strip()
+        s = _strip_repository_banner_lines(s)
         if len(s) < 130 or not _quality_filter_line(s):
             continue
-        if _is_boilerplate_line(s) or _is_probably_reference_entry(s):
+        if _is_boilerplate_line(s) or _is_probably_reference_entry(s) or _is_publisher_licence_or_notice(s):
             continue
         if re.match(r"^table\s+\d", s.lower()):
             continue
@@ -164,6 +234,7 @@ def summarize_for_resource(text: str, max_chars: int = 4000) -> dict[str, str]:
         "Rules:\n"
         "- Do not write generic academic filler or list-like fragments.\n"
         "- No copied sentence fragments or dangling citations.\n"
+        "- Ignore Creative Commons, repository deposit, author-manuscript, and Version-of-Record licence text entirely.\n"
         "- If the text is partial/noisy, state uncertainty briefly instead of guessing.\n"
         f"\n--- OPENING (reading order) ---\n{opening}\n"
         f"\n--- SUBSTANTIVE EXCERPT ---\n{snippet}\n---\n"
@@ -737,6 +808,7 @@ def build_resource_deep_dive(
         "Avoid generic prose.\n"
         "Do not output instructions to the reader. Output concrete synthesis statements only.\n"
         "Ignore publisher/legal/copyright boilerplate and prioritize conceptual content.\n"
+        "Ignore Creative Commons / repository / 'author version' / 'Version of Record' / licence-reuse notices entirely.\n"
         "Prioritize abstract, introduction, findings/results, discussion, and conclusion material.\n"
         "Paraphrase in your own words; avoid quoting source fragments longer than 8 words.\n"
         "Return JSON with keys only:\n"
@@ -817,6 +889,45 @@ def resource_deep_dive_source_digest(resource: dict[str, Any], questions: list[d
     return hashlib.sha256(source_blob.encode("utf-8")).hexdigest()
 
 
+def _substantive_body_paragraphs(evidence_pack: str, min_len: int = 180, cap: int = 6) -> list[str]:
+    out: list[str] = []
+    for p in (evidence_pack or "").splitlines():
+        s = p.strip()
+        if len(s) < min_len:
+            continue
+        if not _quality_filter_line(s):
+            continue
+        if _is_boilerplate_line(s) or _is_publisher_licence_or_notice(s) or _is_probably_reference_entry(s):
+            continue
+        out.append(s)
+    out.sort(key=lambda x: -len(x))
+    return out[:cap]
+
+
+def _synthesize_strong_idea_from_body(paragraph: str) -> str:
+    """Interpretive bullet from a substantive paragraph (offline): avoids pasting chopped fragments."""
+    t = re.sub(r"\s+", " ", (paragraph or "").strip())
+    t = _strip_repository_banner_lines(t).lstrip("\u201c\u201d\"'")
+    parts = re.split(r"(?<=[.!?])\s+", t)
+    pick = ""
+    for seg in parts:
+        seg = seg.strip()
+        if len(seg) >= 72 and not _is_publisher_licence_or_notice(seg):
+            pick = seg
+            break
+    if not pick:
+        pick = t[:300].strip()
+    for lead in ("Importantly, ", "However, ", "Therefore, ", "Thus, ", "Yet, ", "Further, ", "Moreover, "):
+        if pick.lower().startswith(lead.lower()):
+            pick = pick[len(lead) :].strip()
+            break
+    if len(pick) < 55:
+        return "The piece connects legal, technical, and institutional threads in the extracted body (more text improves precision)."
+    if pick[0].islower():
+        return (f"The piece stresses that {pick[:210]}").rstrip(".") + "."
+    return (f"The piece emphasizes that {pick[0].lower() + pick[1:]}")[:220].rstrip(".") + "."
+
+
 def _offline_resource_deep_dive(
     resource: dict[str, Any],
     subtopic: dict[str, Any],
@@ -827,38 +938,57 @@ def _offline_resource_deep_dive(
     title = resource.get("title") or "Untitled resource"
     summary = _normalize_for_prompt((resource.get("summary") or "").strip())
     notes = _normalize_for_prompt((resource.get("notes") or "").strip())
+    body_paras = _substantive_body_paragraphs(evidence_pack, min_len=160, cap=6)
     evidence_notes = _stratified_passages_from_pack(evidence_pack, max_items=8)
+    if len([e for e in evidence_notes if len(e) > 90]) < 2 and body_paras:
+        evidence_notes = _dedupe_text_chunks([p[:400] for p in body_paras[:5]] + evidence_notes, 8)
     signals = _extract_paper_signals(evidence_pack)
-    strongest = [signals[k] for k in ("framework", "method", "findings", "implications") if signals.get(k)]
+    strongest = [_synthesize_strong_idea_from_body(p) for p in body_paras[:4]]
+    if len([x for x in strongest if len(x) > 70]) < 2:
+        sig_list = [signals[k] for k in ("framework", "method", "findings", "implications") if signals.get(k)]
+        strongest = [_summarize_idea(s) for s in sig_list[:4] if s]
     if not strongest:
         strongest = evidence_notes[:3] if evidence_notes else _extract_signal_sentences(summary, max_items=3)
     if not strongest:
         strongest = ["The source appears partially extracted; core argumentative lines are limited."]
 
-    overview_parts = [f"{title} advances a specific argument rather than a generic survey."]
-    if signals.get("question"):
-        overview_parts.append(f"It asks: {_paraphrase_claim(signals['question'])}.")
-    if signals.get("framework"):
-        overview_parts.append(f"It frames the analysis through {_paraphrase_claim(signals['framework'])}.")
-    if signals.get("method"):
-        overview_parts.append(f"The evidence base comes from {_paraphrase_claim(signals['method'])}.")
-    if signals.get("findings"):
-        overview_parts.append(f"Core finding: {_paraphrase_claim(signals['findings'])}.")
-    if signals.get("implications"):
-        overview_parts.append(f"Practical implication: {_paraphrase_claim(signals['implications'])}.")
-    elif summary and len(summary) > 40:
-        overview_parts.append(summary[:260])
-    overview = " ".join(overview_parts)
+    if body_paras:
+        lead_parts: list[str] = []
+        for p in body_paras[:2]:
+            seg = _paraphrase_claim(p[:480])
+            if seg and seg[0].isalpha() and seg[0].islower():
+                seg = seg[0].upper() + seg[1:]
+            if seg:
+                lead_parts.append(seg)
+        lead = " ".join(lead_parts)
+        overview = f"{title}. {lead}".strip()
+        if len(overview) > 960:
+            overview = overview[:957] + "…"
+    else:
+        overview_parts = [f"{title} advances a specific argument rather than a generic survey."]
+        if signals.get("question"):
+            overview_parts.append(f"It asks: {_paraphrase_claim(signals['question'])}.")
+        if signals.get("framework"):
+            overview_parts.append(f"It frames the analysis through {_paraphrase_claim(signals['framework'])}.")
+        if signals.get("method"):
+            overview_parts.append(f"The evidence base comes from {_paraphrase_claim(signals['method'])}.")
+        if signals.get("findings"):
+            overview_parts.append(f"Core finding: {_paraphrase_claim(signals['findings'])}.")
+        if signals.get("implications"):
+            overview_parts.append(f"Practical implication: {_paraphrase_claim(signals['implications'])}.")
+        elif summary and len(summary) > 40:
+            overview_parts.append(summary[:260])
+        overview = " ".join(overview_parts)
 
-    assumptions = _derive_assumptions(strongest, notes, evidence_notes)
-    tensions = _derive_tensions(strongest, evidence_notes)
+    assumptions = _derive_assumptions(strongest, notes, [e for e in evidence_notes if not _is_publisher_licence_or_notice(e)])
+    tensions = _derive_tensions(strongest, [e for e in evidence_notes if not _is_publisher_licence_or_notice(e)])
     writing_angles = _derive_writing_angles(strongest, tensions)
     next_q = _derive_next_questions(strongest, tensions, question_lines)
     key_concepts = _extract_key_concepts(evidence_pack)
     return {
         "evidence_notes": evidence_notes[:5],
         "resource_overview": overview,
-        "strongest_ideas": [_summarize_idea(s) for s in strongest],
+        "strongest_ideas": strongest,
         "assumptions": assumptions,
         "tensions_and_angles": tensions,
         "key_concepts": key_concepts,
@@ -981,7 +1111,12 @@ def _contiguous_evidence_paragraphs(normalized: str, max_chars: int) -> list[str
         if not _quality_filter_line(p):
             weights.append(-220.0)
             continue
-        if _is_boilerplate_line(p) or _looks_like_reference_block_line(p) or _is_probably_reference_entry(p):
+        if (
+            _is_boilerplate_line(p)
+            or _looks_like_reference_block_line(p)
+            or _is_probably_reference_entry(p)
+            or _is_publisher_licence_or_notice(p)
+        ):
             weights.append(-400.0)
             continue
         w = 1.0
@@ -1047,7 +1182,7 @@ def _contiguous_evidence_paragraphs(normalized: str, max_chars: int) -> list[str
         for j, pj in enumerate(paragraphs):
             if weights[j] < -1e5:
                 break
-            if not _quality_filter_line(pj) or _is_boilerplate_line(pj):
+            if not _quality_filter_line(pj) or _is_boilerplate_line(pj) or _is_publisher_licence_or_notice(pj):
                 continue
             if used + len(pj) + 1 > max_chars:
                 break
@@ -1071,7 +1206,9 @@ def _stratified_passages_from_pack(evidence_pack: str, max_items: int = 8) -> li
         i = min(n - 1, int(frac * (n - 1)))
         p = lines[i]
         key = " ".join(p.lower().split()[:10])
-        if key in seen or len(p) < 62 or not _quality_filter_line(p):
+        if key in seen or len(p) < 100 or not _quality_filter_line(p):
+            continue
+        if _is_boilerplate_line(p) or _is_publisher_licence_or_notice(p) or _is_probably_reference_entry(p):
             continue
         seen.add(key)
         out.append(p[:420])
@@ -1079,9 +1216,11 @@ def _stratified_passages_from_pack(evidence_pack: str, max_items: int = 8) -> li
             break
     if len(out) < 3:
         for p in lines:
-            if len(p) < 62:
+            if len(p) < 100:
                 continue
             if not _quality_filter_line(p):
+                continue
+            if _is_boilerplate_line(p) or _is_publisher_licence_or_notice(p) or _is_probably_reference_entry(p):
                 continue
             key = " ".join(p.lower().split()[:10])
             if key in seen:
@@ -1116,6 +1255,11 @@ def _normalize_for_prompt(text: str) -> str:
     raw_lines = []
     for ln in (text or "").splitlines():
         s = " ".join(ln.replace("\u00ad", "").strip().split())
+        s = s.replace("\ufb01", "fi").replace("\ufb02", "fl")
+        s = _repair_hyphen_space_artifacts(_repair_titlecase_word_splits(s))
+        s = _strip_repository_banner_lines(s)
+        if len(s) < 12:
+            continue
         s = re.sub(
             r"([a-z\)])\s+(The findings|These findings|This study|The study|Results|Discussion|Conclusion)\b",
             r"\1. \2",
@@ -1123,7 +1267,7 @@ def _normalize_for_prompt(text: str) -> str:
         )
         if len(s) < 2 or not _quality_filter_line(s):
             continue
-        if _is_boilerplate_line(s):
+        if _is_boilerplate_line(s) or _is_publisher_licence_or_notice(s):
             continue
         raw_lines.append(s)
         seen[s] = seen.get(s, 0) + 1
@@ -1146,7 +1290,7 @@ def _extract_signal_sentences(text: str, max_items: int = 4) -> list[str]:
             continue
         if not _quality_filter_line(s):
             continue
-        if _is_boilerplate_line(s):
+        if _is_boilerplate_line(s) or _is_publisher_licence_or_notice(s):
             continue
         # Favor sentences with specific markers of claims/method/findings.
         score = 0
@@ -1198,6 +1342,12 @@ def _is_boilerplate_line(line: str) -> bool:
         "implied warranties",
         "non-commercial use",
         "small scale, personal",
+        "creative commons",
+        "version of record",
+        "author manuscript",
+        "licence for details",
+        "license for details",
+        "condition of access",
     )
     if any(x in low for x in boiler):
         return True
@@ -1278,7 +1428,14 @@ def _summarize_idea(text: str) -> str:
 
 
 def _paraphrase_claim(text: str) -> str:
-    s = _normalize_for_prompt(text).split("\n")[0].strip()
+    head = _strip_repository_banner_lines((text or "").strip())
+    s = _normalize_for_prompt(head).split("\n")[0].strip() if head else ""
+    if not s:
+        s = _normalize_for_prompt(text or "").split("\n")[0].strip()
+    for lead in ("Importantly, ", "However, ", "Therefore, ", "Thus, ", "Yet, ", "Further, ", "Moreover, "):
+        if s.lower().startswith(lead.lower()):
+            s = s[len(lead) :].strip()
+            break
     for lead in (
         "the paper argues that",
         "this paper argues that",

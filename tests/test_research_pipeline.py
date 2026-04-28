@@ -12,6 +12,19 @@ UPLOADS = os.path.join(BASE, "data", "workspace_uploads")
 
 
 class ResearchPipelineTests(unittest.TestCase):
+    def test_publisher_licence_stripped_from_normalize(self) -> None:
+        blob = (
+            "This may be the author's version (2026) Real Article Title Here.\n"
+            "[Article] Creative Commons Licence, you must assume that re-use is limited to personal use.\n"
+            "Introduction\n"
+            "The analysis argues for stronger governance of algorithmic systems in public agencies.\n"
+        )
+        n = ra._normalize_for_prompt(blob)
+        self.assertNotIn("Creative Commons", n)
+        self.assertNotIn("re-use is limited", n.lower())
+        self.assertIn("Real Article Title", n)
+        self.assertIn("governance", n.lower())
+
     def test_title_rejects_citation_byline(self) -> None:
         junk = (
             "Lastly. (2020, 6 September). Florida mom shocked after finding child sex doll sold on Amazon.\n\n"
