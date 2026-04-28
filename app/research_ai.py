@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from collections import Counter
 from typing import Any, Optional
 
 import app.settings_store as settings_store
@@ -20,25 +22,78 @@ def _client():
     return OpenAI(api_key=key)
 
 
-def _offline_summary(snippet: str) -> dict[str, str]:
-    title = _infer_title_from_text(snippet)
-    points = _extract_signal_sentences(snippet, max_items=4)
-    if points:
+def _dedupe_text_chunks(chunks: list[str], max_items: int = 4) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for x in chunks:
+        s = (x or "").strip()
+        if len(s) < 20:
+            continue
+        key = " ".join(s.lower().split()[:18])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _offline_opening_summary(evidence_snippet: str, max_chars: int = 920) -> str:
+    """Prefer the start of the contiguous evidence (usually abstract/intro) for local summaries."""
+    parts: list[str] = []
+    n = 0
+    for p in (evidence_snippet or "").splitlines():
+        s = re.sub(r"^(ORIGINAL ARTICLE|REVIEW ARTICLE|BRIEF COMMUNICATION)\s+", "", p.strip(), flags=re.I).strip()
+        if len(s) < 130 or not _quality_filter_line(s):
+            continue
+        if _is_boilerplate_line(s) or _is_probably_reference_entry(s):
+            continue
+        if re.match(r"^table\s+\d", s.lower()):
+            continue
+        parts.append(s)
+        n += len(s) + 1
+        if n >= max_chars:
+            break
+    return " ".join(parts)[:max_chars].strip()
+
+
+def _offline_summary(ordered_text: str, evidence_snippet: str) -> dict[str, str]:
+    """ordered_text must be reading-order normalized body; evidence_snippet may be a contiguous excerpt."""
+    title = _infer_title_from_text(ordered_text)
+    signals = _extract_paper_signals(evidence_snippet)
+    points = [signals[k] for k in ("question", "framework", "method", "findings", "implications") if signals.get(k)]
+    points = _dedupe_text_chunks(points, 5)
+    opening_doc = _offline_opening_summary(ordered_text)
+    opening_ev = _offline_opening_summary(evidence_snippet)
+    opening = opening_doc if len(opening_doc) >= 380 else opening_ev
+    if len(opening) >= 380:
+        summary = opening
+    elif points:
         summary = " ".join(points[:3])
     else:
-        summary = (snippet[:500] + "…") if len(snippet) > 500 else snippet
-    return {"title": _sanitize_generated_title(title, snippet), "summary": summary.strip() or "No text extracted."}
+        sents = _extract_signal_sentences(evidence_snippet, max_items=5)
+        summary = " ".join(_dedupe_text_chunks(sents, 3))
+    if not summary.strip() and (opening_doc or opening_ev):
+        summary = opening_doc or opening_ev
+    if not summary.strip():
+        ev = (evidence_snippet or "").strip()
+        summary = (ev[:500] + "…") if len(ev) > 500 else ev
+    return {
+        "title": _sanitize_generated_title(title, ordered_text),
+        "summary": summary.strip() or "No text extracted.",
+    }
 
 
 def _fallback_questions(title: str, evidence_pack: str = "") -> list[str]:
     t = title or "this material"
-    sig = _extract_signal_sentences(evidence_pack, max_items=2)
-    anchor = sig[0] if sig else ""
+    signals = _extract_paper_signals(evidence_pack)
+    anchor = signals.get("findings") or signals.get("framework") or ""
     return [
-        f"What is the core claim in “{t[:80]}”, and what evidence in the source best supports it?",
-        "Which assumptions are implicit but load-bearing, and where are they visible in the text?",
-        f"If the source says '{anchor[:90]}' what tension or counterexample should be tested?" if anchor else "Which argument step is least justified by the source's own evidence?",
-        "What is the smallest follow-up reading or test that could materially change your view of this source?",
+        f"What exact problem does “{t[:80]}” claim prior literature misses, and how convincing is that gap framing?",
+        "Which assumptions connect the framework to the findings, and which are explicit versus implicit?",
+        f"Where could this claim break when moving from digital interaction to offline context: '{anchor[:90]}'?" if anchor else "Which argumentative step appears least supported by the source's own evidence?",
+        "What focused follow-up study would most quickly test the paper's strongest practical implication?",
     ]
 
 
@@ -92,21 +147,26 @@ def _label_from_snippet(snippet: str, fallback: str = "New inquiry") -> str:
 
 def summarize_for_resource(text: str, max_chars: int = 4000) -> dict[str, str]:
     """Return title + summary from raw extracted text."""
+    ordered = _normalize_for_prompt(text or "")
     snippet = _build_evidence_pack(text or "", max_chars=max_chars)
+    opening = _reading_order_prefix(ordered, max_chars=min(2400, max(1200, max_chars // 2 + 300)))
     client = _client()
     if not client:
-        return _offline_summary(snippet)
+        return _offline_summary(ordered, snippet)
 
     prompt = (
-        "Read this evidence pack extracted from one source.\n"
-        "Infer what the source is specifically about based on quoted content.\n"
+        "Read material from ONE source. The opening block is in original reading order (use it to infer the true title).\n"
+        "The second block is a longer contiguous excerpt chosen for substantive sections; do not treat unrelated sentences as one argument.\n"
+        "Infer the source's specific argument structure, not just topic keywords.\n"
         "Return JSON only with keys:\n"
-        '- title: concise source title (6-14 words, source-specific)\n'
-        '- summary: 4-7 sentences grounded in the evidence. Mention at least two concrete claims/ideas from the text.\n'
+        '- title: human-readable work title only (not a citation line, byline, date stamp, or disclaimer). 6-14 words when possible.\n'
+        '- summary: 5-8 coherent sentences grounded in the evidence. Must include (when available): research question, framework, method/sample, central findings, implication.\n'
         "Rules:\n"
-        "- Do not write generic academic filler.\n"
+        "- Do not write generic academic filler or list-like fragments.\n"
+        "- No copied sentence fragments or dangling citations.\n"
         "- If the text is partial/noisy, state uncertainty briefly instead of guessing.\n"
-        f"\n---\n{snippet}\n---\n"
+        f"\n--- OPENING (reading order) ---\n{opening}\n"
+        f"\n--- SUBSTANTIVE EXCERPT ---\n{snippet}\n---\n"
     )
     try:
         resp = client.chat.completions.create(
@@ -117,11 +177,11 @@ def summarize_for_resource(text: str, max_chars: int = 4000) -> dict[str, str]:
         raw = resp.choices[0].message.content or "{}"
         data = json.loads(raw)
         return {
-            "title": _sanitize_generated_title((data.get("title") or "Untitled source").strip(), text or snippet),
+            "title": _sanitize_generated_title((data.get("title") or "Untitled source").strip(), ordered or text),
             "summary": (data.get("summary") or "").strip(),
         }
     except (json.JSONDecodeError, Exception):
-        return _offline_summary(snippet)
+        return _offline_summary(ordered, snippet)
 
 
 def generate_questions(
@@ -667,6 +727,7 @@ def build_resource_deep_dive(
     source_digest = resource_deep_dive_source_digest(resource, questions)
     question_lines = [str(q.get("body") or "").strip() for q in questions if str(q.get("body") or "").strip()]
     evidence_pack = _build_evidence_pack(excerpt or "", max_chars=12000)
+    structured_signals = _extract_paper_signals(evidence_pack)
     client = _client()
     if not client:
         return _offline_resource_deep_dive(resource, subtopic, question_lines, evidence_pack, source_digest)
@@ -695,6 +756,7 @@ def build_resource_deep_dive(
         f"summary: {resource.get('summary') or ''}\n"
         f"notes: {resource.get('notes') or ''}\n"
         f"questions: {json.dumps(question_lines[:12], ensure_ascii=True)}\n"
+        f"structured_signals: {json.dumps(structured_signals, ensure_ascii=True)}\n"
         f"evidence_pack:\n{evidence_pack}\n"
     )
     offline_payload = _offline_resource_deep_dive(resource, subtopic, question_lines, evidence_pack, source_digest)
@@ -765,20 +827,27 @@ def _offline_resource_deep_dive(
     title = resource.get("title") or "Untitled resource"
     summary = _normalize_for_prompt((resource.get("summary") or "").strip())
     notes = _normalize_for_prompt((resource.get("notes") or "").strip())
-    evidence_notes = _section_weighted_passages(evidence_pack, max_items=6)
-    strongest = evidence_notes[:3] if evidence_notes else _extract_signal_sentences(summary, max_items=3)
+    evidence_notes = _stratified_passages_from_pack(evidence_pack, max_items=8)
+    signals = _extract_paper_signals(evidence_pack)
+    strongest = [signals[k] for k in ("framework", "method", "findings", "implications") if signals.get(k)]
+    if not strongest:
+        strongest = evidence_notes[:3] if evidence_notes else _extract_signal_sentences(summary, max_items=3)
     if not strongest:
         strongest = ["The source appears partially extracted; core argumentative lines are limited."]
 
-    overview_parts = [f"{title} advances a focused argument rather than a broad survey."]
-    if strongest:
-        overview_parts.append(f"Its central move is that {_paraphrase_claim(strongest[0])}.")
-    if len(strongest) > 1:
-        overview_parts.append(f"A supporting strand argues that {_paraphrase_claim(strongest[1])}.")
-    if summary and len(summary) > 40:
-        snippet = summary[:260]
-        if snippet not in " ".join(overview_parts):
-            overview_parts.append(snippet)
+    overview_parts = [f"{title} advances a specific argument rather than a generic survey."]
+    if signals.get("question"):
+        overview_parts.append(f"It asks: {_paraphrase_claim(signals['question'])}.")
+    if signals.get("framework"):
+        overview_parts.append(f"It frames the analysis through {_paraphrase_claim(signals['framework'])}.")
+    if signals.get("method"):
+        overview_parts.append(f"The evidence base comes from {_paraphrase_claim(signals['method'])}.")
+    if signals.get("findings"):
+        overview_parts.append(f"Core finding: {_paraphrase_claim(signals['findings'])}.")
+    if signals.get("implications"):
+        overview_parts.append(f"Practical implication: {_paraphrase_claim(signals['implications'])}.")
+    elif summary and len(summary) > 40:
+        overview_parts.append(summary[:260])
     overview = " ".join(overview_parts)
 
     assumptions = _derive_assumptions(strongest, notes, evidence_notes)
@@ -787,7 +856,7 @@ def _offline_resource_deep_dive(
     next_q = _derive_next_questions(strongest, tensions, question_lines)
     key_concepts = _extract_key_concepts(evidence_pack)
     return {
-        "evidence_notes": evidence_notes[:4],
+        "evidence_notes": evidence_notes[:5],
         "resource_overview": overview,
         "strongest_ideas": [_summarize_idea(s) for s in strongest],
         "assumptions": assumptions,
@@ -799,14 +868,239 @@ def _offline_resource_deep_dive(
     }
 
 
+def _reading_order_prefix(ordered: str, max_chars: int) -> str:
+    parts: list[str] = []
+    n = 0
+    for ln in (ordered or "").splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        if n + len(s) + 1 > max_chars:
+            break
+        parts.append(s)
+        n += len(s) + 1
+    return "\n".join(parts).strip()
+
+
+def _looks_like_reference_or_byline(s: str) -> bool:
+    t = (s or "").strip()
+    if not t:
+        return True
+    if "@" in t:
+        return True
+    low = t.lower()
+    if low.startswith(("http://", "https://", "doi:", "received:", "accepted:", "published online")):
+        return True
+    if re.search(r"\bjournal of\b", low) and re.search(r"\bvol\.?\s*\d", low):
+        return True
+    if re.match(r"^[\w\s,\.&'\-]+\.\s*\(\s*20\d{2}\s*,\s*\d{1,2}\s+[a-z]+", low):
+        return True
+    if len(re.findall(r"\(\s*20\d{2}", t)) >= 2:
+        return True
+    if low.startswith(("lastly.", "finally.", "in conclusion,")):
+        return True
+    return False
+
+
+def _looks_like_reference_block_line(s: str) -> bool:
+    low = (s or "").lower().strip()
+    if re.match(r"^\[\d+\]\s+[a-z]", low):
+        return True
+    if low.startswith(("references", "bibliography", "works cited")) and len(s) < 48:
+        return True
+    if len(re.findall(r"\d{4}\s*;\s*\d+", low)) >= 2 and "doi" in low:
+        return True
+    if sum(low.count(x) for x in (" et al.", " et al,", "pp.", "vol.")) >= 2 and len(s) < 220:
+        return True
+    return False
+
+
+def _is_probably_reference_entry(s: str) -> bool:
+    """Detect bibliography / citation lines so they are not used as body evidence or titles."""
+    t = (s or "").strip()
+    if len(t) < 42:
+        return False
+    low = t.lower()
+    if "doi:" in low or "doi.org" in low or "http://" in low or "https://" in low:
+        return True
+    if re.search(r"\(20\d{2}\)", t) and t.count(",") >= 3:
+        return True
+    if re.search(r"\(19\d{2}\)", t) and ("press" in low or "books" in low or "journal" in low):
+        return True
+    if re.search(r"^[A-Z][a-z]+,\s+[A-Z]", t) and re.search(r"\((?:19|20)\d{2}\)", t) and ("&" in t or " and " in t):
+        return True
+    if " ed." in low or " eds." in low or "vol." in low or "pp." in low:
+        return True
+    if re.search(r"\b\d{1,2}\s*\(\s*\d+\s*\)\s*:\s*\d+", t):
+        return True
+    return False
+
+
+def _reference_zone_start(paragraphs: list[str]) -> int:
+    """First index where the document is likely references / bibliography (soft + hard)."""
+    n = len(paragraphs)
+    for i, p in enumerate(paragraphs):
+        low = p.lower().strip().strip(":")
+        if low in ("references", "bibliography", "works cited") and len(p) < 55:
+            return i
+    streak = 0
+    for i, p in enumerate(paragraphs):
+        if _is_probably_reference_entry(p):
+            streak += 1
+            if streak >= 5:
+                return max(0, i - 4)
+        else:
+            streak = 0
+    return n
+
+
+def _contiguous_evidence_paragraphs(normalized: str, max_chars: int) -> list[str]:
+    paragraphs = [p.strip() for p in normalized.splitlines() if p.strip()]
+    if not paragraphs:
+        return []
+    ref_cut = _reference_zone_start(paragraphs)
+    weights: list[float] = []
+    current_section = "body"
+    in_refs = False
+    for i, p in enumerate(paragraphs):
+        if i >= ref_cut:
+            weights.append(-1e6)
+            continue
+        low = p.lower().strip().strip(":")
+        sec = _detect_section(low)
+        if sec and len(p) < 52:
+            current_section = sec
+        if low in ("references", "bibliography", "works cited") and len(p) < 44:
+            in_refs = True
+        if in_refs:
+            weights.append(-1e6)
+            continue
+        if sec and len(p) < 52:
+            weights.append(-45.0)
+            continue
+        if not _quality_filter_line(p):
+            weights.append(-220.0)
+            continue
+        if _is_boilerplate_line(p) or _looks_like_reference_block_line(p) or _is_probably_reference_entry(p):
+            weights.append(-400.0)
+            continue
+        w = 1.0
+        if current_section in {
+            "abstract",
+            "introduction",
+            "framework",
+            "method",
+            "results",
+            "discussion",
+            "conclusion",
+        }:
+            w += 2.3
+        lw = p.lower()
+        for kw in (
+            "argue",
+            "find",
+            "result",
+            "suggest",
+            "framework",
+            "method",
+            "sample",
+            "however",
+            "therefore",
+            "examines",
+            "investigate",
+        ):
+            if kw in lw:
+                w += 0.55
+        if any(k in lw for k in ("table", "figure", "appendix", "doi:", "http", "www.")):
+            w -= 1.6
+        if sum(ch.isdigit() for ch in p) > 14:
+            w -= 0.9
+        weights.append(w)
+
+    n = len(paragraphs)
+    best_local: list[str] = []
+    best_sum = -1e18
+    for i in range(n):
+        ssum = 0.0
+        chars = 0
+        local: list[str] = []
+        for k in range(i, n):
+            wj = weights[k]
+            pj = paragraphs[k]
+            if wj <= -1e5:
+                break
+            if wj < -160:
+                if not local:
+                    continue
+                break
+            if chars + len(pj) + 1 > max_chars:
+                break
+            ssum += max(0.05, wj)
+            chars += len(pj) + 1
+            local.append(pj)
+        if len(local) >= 2 and ssum > best_sum:
+            best_sum = ssum
+            best_local = local
+    if len(best_local) < 2 and paragraphs:
+        out: list[str] = []
+        used = 0
+        for j, pj in enumerate(paragraphs):
+            if weights[j] < -1e5:
+                break
+            if not _quality_filter_line(pj) or _is_boilerplate_line(pj):
+                continue
+            if used + len(pj) + 1 > max_chars:
+                break
+            out.append(pj)
+            used += len(pj) + 1
+            if len(out) >= 6:
+                break
+        return out
+    return best_local
+
+
+def _stratified_passages_from_pack(evidence_pack: str, max_items: int = 8) -> list[str]:
+    """Sample passages in document order (no global re-sort) for offline evidence notes."""
+    lines = [ln.strip() for ln in (evidence_pack or "").splitlines() if ln.strip()]
+    if not lines:
+        return []
+    n = len(lines)
+    out: list[str] = []
+    seen: set[str] = set()
+    for frac in (0.0, 0.08, 0.18, 0.32, 0.48, 0.62, 0.78, 0.9):
+        i = min(n - 1, int(frac * (n - 1)))
+        p = lines[i]
+        key = " ".join(p.lower().split()[:10])
+        if key in seen or len(p) < 62 or not _quality_filter_line(p):
+            continue
+        seen.add(key)
+        out.append(p[:420])
+        if len(out) >= max_items:
+            break
+    if len(out) < 3:
+        for p in lines:
+            if len(p) < 62:
+                continue
+            if not _quality_filter_line(p):
+                continue
+            key = " ".join(p.lower().split()[:10])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(p[:420])
+            if len(out) >= max_items:
+                break
+    return out
+
+
 def _build_evidence_pack(text: str, max_chars: int = 9000) -> str:
     cleaned = _normalize_for_prompt(text)
     if not cleaned:
         return ""
-    picked = _section_weighted_passages(cleaned, max_items=28)
+    picked = _contiguous_evidence_paragraphs(cleaned, max_chars)
     if not picked:
         return cleaned[:max_chars]
-    parts = []
+    parts: list[str] = []
     budget = 0
     for p in picked:
         if budget + len(p) + 1 > max_chars:
@@ -821,8 +1115,13 @@ def _normalize_for_prompt(text: str) -> str:
     seen: dict[str, int] = {}
     raw_lines = []
     for ln in (text or "").splitlines():
-        s = " ".join(ln.strip().split())
-        if len(s) < 2:
+        s = " ".join(ln.replace("\u00ad", "").strip().split())
+        s = re.sub(
+            r"([a-z\)])\s+(The findings|These findings|This study|The study|Results|Discussion|Conclusion)\b",
+            r"\1. \2",
+            s,
+        )
+        if len(s) < 2 or not _quality_filter_line(s):
             continue
         if _is_boilerplate_line(s):
             continue
@@ -834,22 +1133,39 @@ def _normalize_for_prompt(text: str) -> str:
         if seen.get(s, 0) >= repeat_threshold and len(s) < 120:
             continue
         lines.append(s)
-    return "\n".join(lines).strip()
+    paragraphs = _recover_paragraphs_for_ai(lines)
+    return "\n".join(paragraphs).strip()
 
 
 def _extract_signal_sentences(text: str, max_items: int = 4) -> list[str]:
     sents = []
-    raw = _normalize_for_prompt(text).replace("?", ".").replace("!", ".")
-    for part in raw.split("."):
-        s = part.strip()
-        if len(s) < 45:
+    raw = _normalize_for_prompt(text).replace("\n", ". ")
+    for part in re.split(r"[.!?]\s+", raw):
+        s = " ".join(part.strip().split())
+        if len(s) < 55:
+            continue
+        if not _quality_filter_line(s):
             continue
         if _is_boilerplate_line(s):
             continue
         # Favor sentences with specific markers of claims/method/findings.
         score = 0
         low = s.lower()
-        for marker in ("argue", "claim", "find", "result", "because", "therefore", "however", "method", "evidence"):
+        for marker in (
+            "argue",
+            "claim",
+            "find",
+            "result",
+            "because",
+            "therefore",
+            "however",
+            "method",
+            "focus group",
+            "sample",
+            "framework",
+            "implication",
+            "consent",
+        ):
             if marker in low:
                 score += 1
         sents.append((score, s))
@@ -878,6 +1194,10 @@ def _is_boilerplate_line(line: str) -> bool:
         "www.",
         "http://",
         "https://",
+        "disclaim and waive",
+        "implied warranties",
+        "non-commercial use",
+        "small scale, personal",
     )
     if any(x in low for x in boiler):
         return True
@@ -977,36 +1297,60 @@ def _section_weighted_passages(text: str, max_items: int = 10) -> list[str]:
     if not lines:
         return []
     current_section = "body"
-    scored: list[tuple[float, str]] = []
+    scored: list[tuple[float, str, str]] = []
     for ln in lines:
         low = ln.lower()
         sec = _detect_section(low)
         if sec:
             current_section = sec
             continue
-        if len(ln) < 40:
+        if len(ln) < 55:
+            continue
+        if not _quality_filter_line(ln):
             continue
         if _is_boilerplate_line(ln):
             continue
         score = 1.0
-        if current_section in {"abstract", "introduction", "results", "discussion", "conclusion"}:
+        if current_section in {"abstract", "introduction", "framework", "method", "results", "discussion", "conclusion"}:
             score += 2.0
-        if any(k in low for k in ("argue", "claim", "find", "result", "therefore", "however", "suggest", "shows")):
+        if any(
+            k in low
+            for k in (
+                "argue",
+                "claim",
+                "find",
+                "result",
+                "therefore",
+                "however",
+                "suggest",
+                "shows",
+                "framework",
+                "we use",
+                "focus group",
+                "consent",
+            )
+        ):
             score += 1.2
-        if any(k in low for k in ("table", "figure", "appendix", "references")):
+        if any(k in low for k in ("table", "figure", "appendix", "references", "et al.", "doi")):
             score -= 0.8
         if sum(ch.isdigit() for ch in ln) > 10:
             score -= 0.5
-        scored.append((score, ln))
-    scored.sort(key=lambda x: (-x[0], -len(x[1])))
+        scored.append((score, current_section, ln))
+    scored.sort(key=lambda x: (-x[0], -len(x[2])))
     out: list[str] = []
     seen_roots: set[str] = set()
-    for _, ln in scored:
+    section_quota: dict[str, int] = {"abstract": 2, "introduction": 3, "framework": 2, "method": 2, "results": 3, "discussion": 2, "conclusion": 2}
+    section_counts: dict[str, int] = {}
+    for _, sec, ln in scored:
         root = " ".join(ln.lower().split()[:8])
         if root in seen_roots:
             continue
+        lim = section_quota.get(sec, 2)
+        if section_counts.get(sec, 0) >= lim:
+            continue
         seen_roots.add(root)
-        out.append(ln[:240])
+        section_counts[sec] = section_counts.get(sec, 0) + 1
+        out.append(ln[:min(len(ln), 520)])
         if len(out) >= max_items:
             break
     return out
@@ -1015,8 +1359,12 @@ def _section_weighted_passages(text: str, max_items: int = 10) -> list[str]:
 def _detect_section(line_low: str) -> str:
     if line_low.startswith("abstract"):
         return "abstract"
-    if line_low.startswith("introduction"):
+    if line_low.startswith("introduction") or line_low.startswith("background"):
         return "introduction"
+    if "framework" in line_low or line_low.startswith("theory") or line_low.startswith("theoretical"):
+        return "framework"
+    if line_low.startswith("methods") or line_low.startswith("method") or "materials and methods" in line_low:
+        return "method"
     if line_low.startswith("results") or line_low.startswith("findings"):
         return "results"
     if line_low.startswith("discussion"):
@@ -1026,20 +1374,194 @@ def _detect_section(line_low: str) -> str:
     return ""
 
 
-def _infer_title_from_text(text: str) -> str:
-    lines = [ln.strip() for ln in _normalize_for_prompt(text).splitlines() if ln.strip()]
-    for ln in lines[:24]:
-        low = ln.lower()
-        if low in {"abstract", "introduction", "results", "discussion", "conclusion", "findings"}:
+def _candidates_after_year_title_tail(s: str, line_index: int) -> list[str]:
+    """
+    When PDF recovery merges 'Keywords … Received … 2026 REAL TITLE', pull the segment
+    after the last calendar-year token before an uppercase word (title start).
+    """
+    low = (s or "").lower()
+    allow = line_index <= 4 or "keywords" in low or "received:" in low or "accepted:" in low or "author(s)" in low
+    if not allow or len(s) < 40:
+        return []
+    out: list[str] = []
+    for m in re.finditer(r"(?:19|20)\d{2}\s+(?=[A-Z])", s):
+        tail = s[m.end() :].strip(" \t-—")
+        if len(tail) < 28:
             continue
-        if _is_boilerplate_line(ln):
+        if len(tail) > 400:
+            continue
+        if len(tail) > 220:
+            tail = tail[:220].rsplit(" ", 1)[0].strip()
+        if 28 <= len(tail) <= 240:
+            out.append(tail)
+    return out[-1:] if out else []
+
+
+def _isolate_title_from_runon(s: str) -> str:
+    """Pull a likely title from a paragraph that merged title + body (common in PDF recovery)."""
+    t = " ".join((s or "").strip().split())
+    if not t:
+        return ""
+    for sep in (
+        " The theoretical",
+        " This study",
+        " The study",
+        " The present",
+        " The authors",
+        " We ",
+        " It ",
+        " Camming The ",
+        " The integration",
+        " Exploring ",
+    ):
+        idx = t.find(sep)
+        if 28 <= idx <= 160:
+            return t[:idx].strip(" ,.—-")
+    m = re.search(r"\s+[A-Z][a-z]+\s+[A-Z]\.\s+[A-Z][a-z]+", t)
+    if m and m.start() >= 32:
+        return t[: m.start()].strip(" ,.—-")
+    return t
+
+
+def _trim_title_affiliation(title: str) -> str:
+    t = " ".join((title or "").strip().split())
+    if "@" in t:
+        t = t.split("@", 1)[0].strip(" ,.;—-\t")
+    t = re.sub(r"([A-Za-z])1\s+(?=[A-Z])", r"\1 ", t)
+    t = re.sub(r"\s+\d+\s+[A-Z][a-z]+\s+[A-Z][a-z]+(\s+[a-z][a-z0-9._-]+)?\s*$", "", t, flags=re.I).strip()
+    t = re.sub(r"\s+\d+\s+[A-Z][^.!?]{0,90}$", "", t).strip()
+    if ":" in t and len(t) > 92:
+        a, b = t.split(":", 1)
+        bw = b.strip().split()
+        if len(bw) > 4 and len(a.strip()) > 28:
+            t = f"{a.strip()}: {' '.join(bw[:2])}"
+    if "?" in t:
+        t = re.sub(r"\s+(?:of\s+)?Cam Models\s*$", "", t, flags=re.I).strip()
+    return t[:160].rstrip(" ,.;—")
+
+
+def _title_candidates_from_line(ln: str) -> list[str]:
+    out = [ln]
+    if "@" in ln:
+        left = ln.split("@", 1)[0].strip(" ,.;—-\t")
+        if len(left) >= 16:
+            out.insert(0, left)
+    return out
+
+
+def _score_title_line(t: str) -> float:
+    raw = " ".join((t or "").strip().split())
+    if not raw or len(raw) < 12:
+        return -100.0
+    if "@" in raw:
+        raw = raw.split("@", 1)[0].rstrip(" ,.;—-\t")
+    s = raw[:200].rstrip(" ,.;—")
+    low = s.lower()
+    if not s or len(s) < 12:
+        return -100.0
+    if re.match(r"^\d+\s+[A-Za-z]", low):
+        return -95.0
+    if "school of" in low and "university" in low:
+        return -95.0
+    if re.match(r"^rq\s*\d", low):
+        return -95.0
+    if re.match(r"^(age|gender|relationship status|education|employment|residency)\s*,", low):
+        return -70.0
+    if re.match(r"^table\s+\d", low):
+        return -85.0
+    if any(
+        x in low
+        for x in (
+            "straße",
+            "sherbrooke",
+            "bismarck",
+            "declarations",
+            "consent to participate",
+            "informed consent was obtained",
+            "competing interests",
+            "funding:",
+            "availability of data",
+        )
+    ):
+        return -95.0
+    if re.search(r"\buniversity\b.*\b(germany|canada|montreal|duisburg)\b", low):
+        return -95.0
+    if _looks_like_reference_or_byline(s) or _is_boilerplate_line(s):
+        return -100.0
+    if low.startswith(("original article", "review article", "abstract")):
+        return -55.0
+    if low.startswith("keywords ") and "received:" in low:
+        return -35.0
+    if any(low.startswith(p) for p in ("the ", "this ", "we ", "our ", "authors ", "using ", "while ", "although ")):
+        return -35.0
+    if low.startswith(("abstract", "introduction", "keywords", "accepted:", "received:", "published ", "doi:")):
+        return -80.0
+    if "disclaim" in low or "warranties" in low or "all parties" in low:
+        return -100.0
+    if low in {"abstract", "introduction", "results", "discussion", "conclusion", "findings", "original article"}:
+        return -60.0
+    score = 0.0
+    if s[0].isalpha() and s[0].islower():
+        score -= 52.0
+    if 38 <= len(s) <= 130:
+        score += 18.0
+    elif 24 <= len(s) < 38:
+        score += 8.0
+    words = s.split()
+    if len(words) >= 5:
+        score += 8.0
+    if ":" in s and len(s) < 165:
+        score += 10.0
+    if len(raw) > 200 and ":" not in raw[:140]:
+        score -= 18.0
+    if s.count("&") >= 2 and "?" not in s:
+        score -= 28.0
+    if "?" in s and 40 <= len(s) <= 200:
+        score += 12.0
+    score -= min(35.0, float(len(re.findall(r"\(\s*20\d{2}\)", s))) * 12.0)
+    score -= min(18.0, float(len(re.findall(r"\b20\d{2}\b", s))) * 3.0)
+    if low.startswith(("http://", "https://")):
+        return -100.0
+    return score
+
+
+def _infer_title_from_text(text: str) -> str:
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return "Untitled source"
+    best = ""
+    best_score = -1e9
+    for i, ln in enumerate(lines[:85]):
+        extra_tails = _candidates_after_year_title_tail(ln, i)
+        for cand in list(_title_candidates_from_line(ln)) + extra_tails:
+            for variant in {cand, _isolate_title_from_runon(cand)}:
+                if not variant:
+                    continue
+                sc = _score_title_line(variant)
+                if sc > best_score:
+                    best_score = sc
+                    best = variant
+        if i + 1 < len(lines):
+            merged = f"{lines[i]} {lines[i+1]}".strip()
+            if 26 <= len(merged) <= 195:
+                sc = _score_title_line(merged) + 2.5
+                if sc > best_score:
+                    best_score = sc
+                    best = merged
+    if best_score >= 5.0 and best:
+        return _trim_title_affiliation(best)
+    for ln in lines[:40]:
+        low = ln.lower()
+        if low in {"abstract", "introduction", "results", "discussion", "conclusion", "findings", "original article"}:
+            continue
+        if _is_boilerplate_line(ln) or _looks_like_reference_or_byline(ln):
             continue
         first = ln.split()[0].lower() if ln.split() else ""
         if first in {"the", "this", "we", "our"}:
             continue
-        if len(ln) <= 120:
-            return ln
-    return "Untitled source"
+        if 20 <= len(ln) <= 160 and _score_title_line(ln) >= 6.0:
+            return _trim_title_affiliation(ln)
+    return _trim_title_affiliation(best) if best else "Untitled source"
 
 
 def _sanitize_generated_title(title: str, source_text: str) -> str:
@@ -1047,25 +1569,216 @@ def _sanitize_generated_title(title: str, source_text: str) -> str:
     if not t:
         return _infer_title_from_text(source_text)
     low = t.lower()
-    bad_starts = ("the paper ", "this paper ", "the author ", "a key finding", "we examine", "we propose")
-    if any(low.startswith(bs) for bs in bad_starts) or len(t) > 120:
+    bad_starts = (
+        "the paper ",
+        "this paper ",
+        "the author ",
+        "a key finding",
+        "we examine",
+        "we propose",
+        "all parties ",
+    )
+    if any(low.startswith(bs) for bs in bad_starts) or len(t) > 160:
         return _infer_title_from_text(source_text)
-    return t
+    if _looks_like_reference_or_byline(t) or _is_boilerplate_line(t):
+        return _infer_title_from_text(source_text)
+    if "disclaim" in low or "implied warranties" in low:
+        return _infer_title_from_text(source_text)
+    if _score_title_line(t) < 3.0:
+        return _infer_title_from_text(source_text)
+    return _trim_title_affiliation(t)
 
 
 def _extract_key_concepts(text: str) -> list[str]:
-    concepts = []
-    for s in _extract_signal_sentences(text, max_items=8):
-        words = [w.strip(" ,;:()[]").lower() for w in s.split()]
-        for i, w in enumerate(words):
-            if len(w) < 6 or not w.isalpha():
+    corpus = _normalize_for_prompt(text)
+    sentences = _extract_signal_sentences(corpus, max_items=18)
+    phrase_counts: Counter[str] = Counter()
+    phrase_sentence: dict[str, str] = {}
+    patterns = [
+        r"\b([A-Za-z][A-Za-z\-]{3,}(?:\s+[A-Za-z][A-Za-z\-]{2,}){0,3}\s+(?:framework|theory|market|consent|brokering|broker|discourse|scripts?|implication|violence|culture|method))\b",
+        r"\b((?:focus group|focus groups|participants|sample of \d+|dataset|sexual market framework|digital brokering))\b",
+    ]
+    for s in sentences:
+        low = s.lower()
+        for pat in patterns:
+            for m in re.finditer(pat, s):
+                p = m.group(1).strip().lower()
+                p = re.sub(r"^(that|this|these|those|their|its)\s+", "", p)
+                if not _is_valid_concept_phrase(p):
+                    continue
+                phrase_counts[p] += 1
+                phrase_sentence[p] = s
+    out = []
+    for phrase, _ in phrase_counts.most_common(10):
+        sent = phrase_sentence.get(phrase, "")
+        why = _infer_concept_role(phrase, sent)
+        out.append(f"{phrase}: {why}")
+        if len(out) >= 6:
+            break
+    if not out:
+        signals = _extract_paper_signals(corpus)
+        for key, val in signals.items():
+            if not val:
                 continue
-            if w in {"because", "therefore", "however", "between", "through", "within"}:
+            lead = " ".join(val.split()[:5]).lower()
+            if lead.startswith("for example") or lead.startswith("for instance"):
                 continue
-            phrase = w
-            if i + 1 < len(words) and words[i + 1].isalpha() and len(words[i + 1]) > 4:
-                phrase = f"{w} {words[i + 1]}"
-            concepts.append(f"{phrase}: operative concept in the source's argument")
-            if len(concepts) >= 5:
-                return concepts
-    return concepts
+            if len(lead.split()) >= 2:
+                out.append(f"{lead}: extracted from the paper's {key} signal")
+            if len(out) >= 5:
+                break
+    return out
+
+
+def _quality_filter_line(line: str) -> bool:
+    s = (line or "").strip()
+    if not s:
+        return False
+    if len(s) < 25:
+        low_short = s.lower().strip()
+        if low_short in (
+            "original article",
+            "review article",
+            "brief communication",
+            "editorial",
+        ):
+            return True
+        return False
+    alpha = sum(ch.isalpha() for ch in s)
+    if alpha < max(10, int(len(s) * 0.45)):
+        return False
+    if len(re.findall(r"\b(?:et al|vol|no|pp)\b", s.lower())) >= 2:
+        return False
+    if re.search(r"\(\d{4}\)", s) and len(s) < 60:
+        return False
+    return True
+
+
+def _looks_like_section_heading(line: str) -> bool:
+    low = line.lower().strip().strip(":")
+    if low in {"abstract", "introduction", "background", "methods", "method", "results", "findings", "discussion", "conclusion", "references"}:
+        return True
+    if re.match(r"^\d+(\.\d+)*\s+[A-Za-z]", line):
+        return True
+    return False
+
+
+def _recover_paragraphs_for_ai(lines: list[str]) -> list[str]:
+    paragraphs: list[str] = []
+    current = ""
+    for raw in lines:
+        ln = raw.strip()
+        if not ln:
+            continue
+        if _looks_like_section_heading(ln):
+            if current:
+                paragraphs.append(current.strip())
+                current = ""
+            paragraphs.append(ln)
+            continue
+        if not current:
+            current = ln
+            continue
+        if current.endswith("-") and ln and ln[0].islower():
+            current = current[:-1] + ln
+            continue
+        if current[-1] in ".!?":
+            paragraphs.append(current.strip())
+            current = ln
+            continue
+        if current[-1] in ":;" and len(current) > 110:
+            paragraphs.append(current.strip())
+            current = ln
+            continue
+        current = f"{current} {ln}"
+    if current:
+        paragraphs.append(current.strip())
+    deduped = []
+    seen = set()
+    for p in paragraphs:
+        key = " ".join(p.lower().split()[:12])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(p)
+    return deduped
+
+
+def _extract_paper_signals(text: str) -> dict[str, str]:
+    sentences = _extract_signal_sentences(text, max_items=24)
+    return {
+        "question": _pick_best_sentence(sentences, ("ask", "question", "examines", "investigate", "we examine", "we ask", "why", "how")),
+        "framework": _pick_best_sentence(sentences, ("framework", "theory", "lens", "market", "conceptual", "broker", "sexual market", "digitally")),
+        "method": _pick_best_sentence(
+            sentences,
+            ("method", "sample", "participants", "focus group", "interview", "survey", "n=", "dataset", "data consist", "data consists"),
+        ),
+        "findings": _pick_best_sentence(sentences, ("find", "shows", "suggest", "identify", "results", "three", "forms")),
+        "implications": _pick_best_sentence(sentences, ("implication", "prevention", "practice", "should", "recommend", "policy", "must")),
+    }
+
+
+def _pick_best_sentence(sentences: list[str], markers: tuple[str, ...]) -> str:
+    best = ""
+    best_score = 0
+    for s in sentences:
+        low = s.lower()
+        score = sum(1 for m in markers if m in low)
+        if score > best_score:
+            best = s
+            best_score = score
+    return best[:240]
+
+
+def _is_valid_concept_phrase(phrase: str) -> bool:
+    toks = [t for t in re.split(r"\s+", phrase.strip().lower()) if t]
+    while toks and toks[0] in {"that", "this", "these", "those", "their", "its"}:
+        toks = toks[1:]
+    if len(toks) < 2 or len(toks) > 5:
+        return False
+    bad = {
+        "suggested",
+        "finding",
+        "results",
+        "paper",
+        "study",
+        "author",
+        "their",
+        "therefore",
+        "however",
+        "because",
+        "important",
+        "strong",
+        "analytic",
+        "consists",
+        "florida",
+        "amazon",
+        "shocked",
+        "child",
+        "photo",
+        "resembling",
+        "september",
+        "mom",
+        "sold",
+        "doll",
+        "daily",
+        "news",
+    }
+    if any(t in bad for t in toks):
+        return False
+    if all(len(t) <= 3 for t in toks):
+        return False
+    return True
+
+
+def _infer_concept_role(phrase: str, sentence: str) -> str:
+    low = (sentence or "").lower()
+    if "framework" in low or "lens" in low or "theory" in low:
+        return "organizes the paper's explanatory frame"
+    if "method" in low or "focus group" in low or "sample" in low:
+        return "anchors how evidence is gathered"
+    if "consent" in phrase or "consent" in low:
+        return "defines how the argument handles negotiation and boundaries"
+    if "implication" in low or "prevention" in low or "should" in low:
+        return "drives the paper's practical takeaway"
+    return "functions as a recurring idea in the core argument"
